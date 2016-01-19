@@ -207,6 +207,25 @@ cdef inline int in_positives(int item_id, int user_id, CSRMatrix interactions) n
     else:
         return 1
 
+cdef inline int is_larger(int user_id, int negative_item_id, flt positive_item_val, CSRMatrix interactions) nogil:
+
+    cdef int value_pass, c, start_idx, stop_idx
+
+    start_idx = interactions.get_row_start(user_id)
+    stop_idx = interactions.get_row_end(user_id)
+    value_pass = 0
+
+    while c < stop_idx and c >= start_idx:
+        if interactions.indices[c] == negative_item_id:
+            if interactions.data[c] >= positive_item_val:
+                # printf('Positive item count: %d', positive_item_val)
+                # printf('Negative item count: %d', interactions.data[c])
+                value_pass = 1
+                continue
+            continue
+        c = c + 1
+
+    return value_pass
 
 cdef inline void compute_representation(CSRMatrix features,
                                         flt[:, ::1] feature_embeddings,
@@ -698,7 +717,7 @@ def fit_warp(CSRMatrix item_features,
     Fit the model using the WARP loss.
     """
 
-    cdef int i, no_examples, user_id, positive_item_id, gamma, max_sampled
+    cdef int i, no_examples, user_id, positive_item_id, gamma, max_sampled, start_idx, stop_idx, c, value_pass
     cdef int negative_item_id, sampled, row
     cdef double positive_prediction, negative_prediction, violation, weight
     cdef double loss, MAX_LOSS
@@ -729,8 +748,9 @@ def fit_warp(CSRMatrix item_features,
             user_id = user_ids[row]
             positive_item_id = item_ids[row]
 
-            if not Y[row] == 1:
-                continue
+            # No longer needed
+            # if not Y[row] == 1:
+            #     continue
 
             compute_representation(user_features,
                                    lightfm.user_features,
@@ -760,6 +780,12 @@ def fit_warp(CSRMatrix item_features,
                 negative_item_id = (rand_r(&random_states[openmp.omp_get_thread_num()])
                                     % item_features.rows)
 
+                # Sample again if interaction counts for negative item are actually larger than positive item
+                # This is super slow. Should find better way
+                if in_positives(negative_item_id, user_id, interactions) and is_larger(user_id, negative_item_id, Y[row], interactions):
+                    continue
+
+
                 compute_representation(item_features,
                                        lightfm.item_features,
                                        lightfm.item_biases,
@@ -774,10 +800,10 @@ def fit_warp(CSRMatrix item_features,
 
                 if negative_prediction > positive_prediction - 1:
 
-                    # Sample again if the sample negative is actually a positive
-                    if in_positives(negative_item_id, user_id, interactions):
-                        continue
-                    
+                    # # Sample again if the sample negative is actually a positive
+                    # if in_positives(negative_item_id, user_id, interactions):
+                    #     continue
+
                     weight = log(floor((item_features.rows - 1) / sampled))
                     violation = 1 - positive_prediction + negative_prediction
                     loss = weight * violation
