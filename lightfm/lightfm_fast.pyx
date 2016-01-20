@@ -207,25 +207,49 @@ cdef inline int in_positives(int item_id, int user_id, CSRMatrix interactions) n
     else:
         return 1
 
-cdef inline int is_larger(int user_id, int negative_item_id, flt positive_item_val, CSRMatrix interactions) nogil:
+cdef inline int find_item_index(int user_id, int item_id, CSRMatrix interactions) nogil:
 
-    cdef int value_pass, c, start_idx, stop_idx
+    # Note: I don't really know what I'm doing, but this seems to work
+
+    cdef void *idx
+    cdef int *i
+    cdef int return_i
+    cdef int start_idx, stop_idx
 
     start_idx = interactions.get_row_start(user_id)
     stop_idx = interactions.get_row_end(user_id)
-    value_pass = 0
+    idx = bsearch(&item_id,
+                &interactions.indices[start_idx],
+                stop_idx - start_idx,
+                sizeof(int),
+                int_compare)
 
-    while c < stop_idx and c >= start_idx:
-        if interactions.indices[c] == negative_item_id:
-            if interactions.data[c] >= positive_item_val:
-                # printf('Positive item count: %d', positive_item_val)
-                # printf('Negative item count: %d', interactions.data[c])
-                value_pass = 1
-                continue
-            continue
-        c = c + 1
+    if not idx:
+        return 0
+    else:
+        i = <int*> idx
+        return_i = <int> (i - &interactions.indices[start_idx])
+        return return_i + start_idx
 
-    return value_pass
+# cdef inline int is_larger(int user_id, int negative_item_id, flt positive_item_val, CSRMatrix interactions) nogil:
+
+#     cdef int value_pass, c, start_idx, stop_idx
+
+#     start_idx = interactions.get_row_start(user_id)
+#     stop_idx = interactions.get_row_end(user_id)
+#     value_pass = 0
+
+#     while c < stop_idx and c >= start_idx:
+#         if interactions.indices[c] == negative_item_id:
+#             if interactions.data[c] >= positive_item_val:
+#                 # printf('Positive item count: %d', positive_item_val)
+#                 # printf('Negative item count: %d', interactions.data[c])
+#                 value_pass = 1
+#                 continue
+#             continue
+#         c = c + 1
+
+#     return value_pass
 
 cdef inline void compute_representation(CSRMatrix features,
                                         flt[:, ::1] feature_embeddings,
@@ -782,8 +806,12 @@ def fit_warp(CSRMatrix item_features,
 
                 # Sample again if interaction counts for negative item are actually larger than positive item
                 # This is super slow. Should find better way
-                if in_positives(negative_item_id, user_id, interactions) and is_larger(user_id, negative_item_id, Y[row], interactions):
-                    continue
+                # negative_item_index = find_item_index(user_id, negative_item_id, interactions)
+                # if negative_item_index and Y[negative_item_index] >= Y[row]:
+                #     continue
+                # if in_positives(negative_item_id, user_id, interactions):
+                #     if is_larger(user_id, negative_item_id, Y[row], interactions):
+                #         continue
 
 
                 compute_representation(item_features,
@@ -1139,6 +1167,30 @@ def predict_lightfm(CSRMatrix item_features,
                                                           it_repr,
                                                           lightfm.no_components)
 
+def test_find_func(CSRMatrix item_features,
+                 CSRMatrix user_features,
+                 CSRMatrix interactions,
+                 int[::1] user_ids,
+                 int[::1] item_ids,
+                 flt[::1] Y,
+                 int[::1] shuffle_indices,
+                 FastLightFM lightfm,
+                 double learning_rate,
+                 double item_alpha,
+                 double user_alpha,
+                 int num_threads,
+                 int user_id,
+                 int positive_item_index,
+                 int negative_item_id):
+
+    cdef int negative_item_index
+
+    negative_item_index = find_item_index(user_id, negative_item_id, interactions)
+
+    print 'Negative item index: %d' % negative_item_index
+    print 'Positive item index: %d' % positive_item_index
+    print 'Negative item counts: %d' % Y[negative_item_index]
+    print 'Positive item counts: %d' % Y[positive_item_index]
 
 # Expose test functions
 def __test_in_positives(int row, int col, CSRMatrix mat):

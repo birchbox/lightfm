@@ -6,7 +6,8 @@ import scipy.sparse as sp
 
 from .lightfm_fast import (CSRMatrix, FastLightFM,
                            fit_logistic, predict_lightfm,
-                           fit_warp, fit_bpr, fit_warp_kos)
+                           fit_warp, fit_bpr, fit_warp_kos,
+                           test_find_func)
 
 
 CYTHON_DTYPE = np.float32
@@ -411,3 +412,95 @@ class LightFM(object):
                         num_threads)
 
         return predictions
+
+    def testing(self, interactions, user_id=0, positive_item_index=60, negative_item_id=0,
+                user_features=None, item_features=None,
+                epochs=1, num_threads=1, verbose=False):
+        """
+        Fit the model. Repeated calls to this function will resume training from
+        the point where the last call finished.
+
+        Arguments:
+        - coo_matrix interactions: matrix of shape [n_users, n_items] containing
+                                   user-item interactions
+        - csr_matrix user_features: array of shape [n_users, n_user_features].
+                                    Each row contains that user's weights
+                                    over features.
+        - csr_matrix item_features: array of shape [n_items, n_item_features].
+                                    Each row contains that item's weights
+                                    over features.
+
+        - int epochs: number of epochs to run. Default: 1
+        - int num_threads: number of parallel computation threads to use. Should
+                           not be higher than the number of physical cores.
+                           Default: 1
+        - bool verbose: whether to print progress messages.
+        """
+
+
+        # We need this in the COO format.
+        # If that's already true, this is a no-op.
+        interactions = interactions.tocoo()
+
+        n_users, n_items = interactions.shape
+        (user_features,
+         item_features) = self._construct_feature_matrices(n_users,
+                                                           n_items,
+                                                           user_features,
+                                                           item_features)
+
+        interactions = self._to_cython_dtype(interactions)
+        user_features = self._to_cython_dtype(user_features)
+        item_features = self._to_cython_dtype(item_features)
+
+        if self.item_embeddings is None:
+            # Initialise latent factors only if this is the first call
+            # to fit_partial.
+            self._initialize(self.no_components,
+                             item_features.shape[1],
+                             user_features.shape[1])
+
+        # Check that the dimensionality of the feature matrices has
+        # not changed between runs.
+        if not item_features.shape[1] == self.item_embeddings.shape[0]:
+            raise Exception('Incorrect number of features in item_features')
+
+        if not user_features.shape[1] == self.user_embeddings.shape[0]:
+            raise Exception('Incorrect number of features in user_features')
+
+        # Create shuffle indexes.
+        shuffle_indices = np.arange(len(interactions.data), dtype=np.int32)
+        np.random.shuffle(shuffle_indices)
+
+        lightfm_data = FastLightFM(self.item_embeddings,
+                                   self.item_embedding_gradients,
+                                   self.item_embedding_momentum,
+                                   self.item_biases,
+                                   self.item_bias_gradients,
+                                   self.item_bias_momentum,
+                                   self.user_embeddings,
+                                   self.user_embedding_gradients,
+                                   self.user_embedding_momentum,
+                                   self.user_biases,
+                                   self.user_bias_gradients,
+                                   self.user_bias_momentum,
+                                   self.no_components,
+                                   int(self.learning_schedule == 'adadelta'),
+                                   self.learning_rate,
+                                   self.rho,
+                                   self.epsilon)
+        test_find_func(CSRMatrix(item_features),
+                 CSRMatrix(user_features),
+                 CSRMatrix(self._get_positives_lookup_matrix(interactions)),
+                 interactions.row,
+                 interactions.col,
+                 interactions.data,
+                 shuffle_indices,
+                 lightfm_data,
+                 self.learning_rate,
+                 self.item_alpha,
+                 self.user_alpha,
+                 num_threads,
+                 user_id,
+                 positive_item_index,
+                 negative_item_id)
