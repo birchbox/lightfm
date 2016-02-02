@@ -225,7 +225,7 @@ cdef inline int find_item_index(int user_id, int item_id, CSRMatrix interactions
                 int_compare)
 
     if not idx:
-        return 0
+        return -1
     else:
         i = <int*> idx
         return_i = <int> (i - &interactions.indices[start_idx])
@@ -297,6 +297,51 @@ cdef inline flt compute_prediction_from_repr(flt *user_repr,
     # Latent factor dot product
     for i in range(no_components):
         result += user_repr[i] * item_repr[i]
+
+    return result
+
+
+cdef inline flt compute_prediction_from_repr_nobias(flt *user_repr,
+                                             flt *item_repr,
+                                             int no_components) nogil:
+
+    cdef int i
+    cdef flt result
+
+    # Latent factor dot product
+    for i in range(no_components):
+        result += user_repr[i] * item_repr[i]
+
+    return result
+
+
+cdef inline flt compute_ii_from_repr_nobias(flt *item_i_repr,
+                                       flt *item_j_repr,
+                                       int no_components) nogil:
+
+    cdef int i
+    cdef flt result
+
+    result = 0.0
+    # Latent factor dot product
+    for i in range(no_components):
+        result += item_i_repr[i] * item_j_repr[i]
+
+    return result
+
+
+cdef inline flt compute_ii_from_repr(flt *item_i_repr,
+                                       flt *item_j_repr,
+                                       int no_components) nogil:
+
+    cdef int i
+    cdef flt result
+
+    # Biases
+    result = item_i_repr[no_components] + item_j_repr[no_components]
+    # Latent factor dot product
+    for i in range(no_components):
+        result += item_i_repr[i] * item_j_repr[i]
 
     return result
 
@@ -741,8 +786,8 @@ def fit_warp(CSRMatrix item_features,
     Fit the model using the WARP loss.
     """
 
-    cdef int i, no_examples, user_id, positive_item_id, gamma, max_sampled, start_idx, stop_idx, c, value_pass
-    cdef int negative_item_id, sampled, row
+    cdef int i, no_examples, user_id, positive_item_id, gamma, max_sampled
+    cdef int negative_item_id, sampled, row, negative_item_index
     cdef double positive_prediction, negative_prediction, violation, weight
     cdef double loss, MAX_LOSS
     cdef flt *user_repr
@@ -804,15 +849,12 @@ def fit_warp(CSRMatrix item_features,
                 negative_item_id = (rand_r(&random_states[openmp.omp_get_thread_num()])
                                     % item_features.rows)
 
-                # Sample again if interaction counts for negative item are actually larger than positive item
-                # This is super slow. Should find better way
-                # negative_item_index = find_item_index(user_id, negative_item_id, interactions)
-                # if negative_item_index and Y[negative_item_index] >= Y[row]:
-                #     continue
-                # if in_positives(negative_item_id, user_id, interactions):
-                #     if is_larger(user_id, negative_item_id, Y[row], interactions):
-                #         continue
-
+                # Sample again if interaction counts for negative item are greater than or
+                # equal to positive item
+                negative_item_index = find_item_index(user_id, negative_item_id, interactions)
+                if negative_item_index != -1:
+                    if Y[negative_item_index] >= Y[row]:
+                        continue
 
                 compute_representation(item_features,
                                        lightfm.item_features,
@@ -1130,7 +1172,8 @@ def predict_lightfm(CSRMatrix item_features,
                     int[::1] item_ids,
                     double[::1] predictions,
                     FastLightFM lightfm,
-                    int num_threads):
+                    int num_threads,
+                    int bias):
     """
     Generate predictions.
     """
@@ -1163,9 +1206,62 @@ def predict_lightfm(CSRMatrix item_features,
                                    lightfm.item_scale,
                                    it_repr)
 
-            predictions[i] = compute_prediction_from_repr(user_repr,
-                                                          it_repr,
-                                                          lightfm.no_components)
+            if bias == 1:
+                predictions[i] = compute_prediction_from_repr(user_repr,
+                                                              it_repr,
+                                                              lightfm.no_components)
+            else:
+                predictions[i] = compute_prediction_from_repr_nobias(user_repr,
+                                                                     it_repr,
+                                                                     lightfm.no_components)
+
+
+def item_to_item_lightfm(CSRMatrix item_features,
+                         int[::1] item_ids,
+                         double[:,:] predictions,
+                         FastLightFM lightfm,
+                         int bias):
+    """
+    Generate item-to-item recommendaitons.
+    """
+
+    cdef int i, no_examples
+    cdef flt *it_i_repr
+    cdef flt *it_j_repr
+
+    no_examples = predictions.shape[0]
+
+    # with nogil, parallel(num_threads=num_threads):
+
+    it_i_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
+    it_j_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
+
+    for i in range(no_examples):
+        for j in range(i, no_examples):
+            compute_representation(item_features,
+                                   lightfm.item_features,
+                                   lightfm.item_biases,
+                                   lightfm,
+                                   item_ids[i],
+                                   lightfm.item_scale,
+                                   it_i_repr)
+            compute_representation(item_features,
+                                   lightfm.item_features,
+                                   lightfm.item_biases,
+                                   lightfm,
+                                   item_ids[j],
+                                   lightfm.item_scale,
+                                   it_j_repr)
+
+            if bias == 1:
+                predictions[i, j] = compute_ii_from_repr(it_i_repr,
+                                                         it_j_repr,
+                                                         lightfm.no_components)
+            else:
+                predictions[i, j] = compute_ii_from_repr_nobias(it_i_repr,
+                                                                it_j_repr,
+                                                                lightfm.no_components)
+
 
 def test_find_func(CSRMatrix item_features,
                  CSRMatrix user_features,
@@ -1191,6 +1287,7 @@ def test_find_func(CSRMatrix item_features,
     print 'Positive item index: %d' % positive_item_index
     print 'Negative item counts: %d' % Y[negative_item_index]
     print 'Positive item counts: %d' % Y[positive_item_index]
+
 
 # Expose test functions
 def __test_in_positives(int row, int col, CSRMatrix mat):
