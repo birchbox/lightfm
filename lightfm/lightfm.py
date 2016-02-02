@@ -7,6 +7,7 @@ import scipy.sparse as sp
 from .lightfm_fast import (CSRMatrix, FastLightFM,
                            fit_logistic, predict_lightfm,
                            fit_warp, fit_bpr, fit_warp_kos,
+                           item_to_item_lightfm,
                            test_find_func)
 
 
@@ -350,7 +351,7 @@ class LightFM(object):
                          self.user_alpha,
                          num_threads)
 
-    def predict(self, user_ids, item_ids, item_features=None, user_features=None, num_threads=1):
+    def predict(self, user_ids, item_ids, item_features=None, user_features=None, num_threads=1, bias=1):
         """
         Predict the probability of a positive interaction.
 
@@ -409,32 +410,75 @@ class LightFM(object):
                         item_ids,
                         predictions,
                         lightfm_data,
-                        num_threads)
+                        num_threads,
+                        bias)
 
         return predictions
+
+    def item_to_item(self, n_users, item_ids, item_features=None, bias=1):
+        """
+        Calcualte dot product of every item embedding with every other item embedding.
+
+        Arguments:
+        - int n_users: number of users in original dataset. Kind of odd, but need to include
+        - ndarray item_ids: List of item ids. Can make by np.arange(n_items)
+        - csr_matrix item_features: array of shape [n_samples, n_item_features].
+                                    Each row contains that row's item's weights
+                                    over features.
+        Returns:
+        - numpy array predictions: [n_items, n_items] array of item-to-item dot products.
+        """
+        # Must have a trained model
+        assert self.user_embeddings is not None
+        assert self.item_embeddings is not None
+
+        n_items = item_ids.max() + 1
+
+        (user_features,
+        item_features) = self._construct_feature_matrices(n_users,
+                                                         n_items,
+                                                         None,
+                                                         item_features)
+
+        item_features = self._to_cython_dtype(item_features)
+
+        lightfm_data = FastLightFM(self.item_embeddings,
+                                   self.item_embedding_gradients,
+                                   self.item_embedding_momentum,
+                                   self.item_biases,
+                                   self.item_bias_gradients,
+                                   self.item_bias_momentum,
+                                   self.user_embeddings,
+                                   self.user_embedding_gradients,
+                                   self.user_embedding_momentum,
+                                   self.user_biases,
+                                   self.user_bias_gradients,
+                                   self.user_bias_momentum,
+                                   self.no_components,
+                                   int(self.learning_schedule == 'adadelta'),
+                                   self.learning_rate,
+                                   self.rho,
+                                   self.epsilon)
+
+        predictions = np.empty((len(item_ids), len(item_ids)), dtype=np.float64)
+
+        item_to_item_lightfm(CSRMatrix(item_features),
+                             item_ids,
+                             predictions,
+                             lightfm_data,
+                             bias)
+
+        # Symmetrize predictions matrix
+        predictions += np.tril(predictions.T, -1)
+
+        return predictions
+
 
     def testing(self, interactions, user_id=0, positive_item_index=60, negative_item_id=0,
                 user_features=None, item_features=None,
                 epochs=1, num_threads=1, verbose=False):
         """
-        Fit the model. Repeated calls to this function will resume training from
-        the point where the last call finished.
-
-        Arguments:
-        - coo_matrix interactions: matrix of shape [n_users, n_items] containing
-                                   user-item interactions
-        - csr_matrix user_features: array of shape [n_users, n_user_features].
-                                    Each row contains that user's weights
-                                    over features.
-        - csr_matrix item_features: array of shape [n_items, n_item_features].
-                                    Each row contains that item's weights
-                                    over features.
-
-        - int epochs: number of epochs to run. Default: 1
-        - int num_threads: number of parallel computation threads to use. Should
-                           not be higher than the number of physical cores.
-                           Default: 1
-        - bool verbose: whether to print progress messages.
+        Testing. Please ignore
         """
 
 
