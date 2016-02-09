@@ -357,6 +357,63 @@ cdef double update_biases(CSRMatrix feature_indices,
 
     return sum_learning_rate
 
+cdef double update_biases_slow(CSRMatrix feature_indices,
+                          int start,
+                          int stop,
+                          flt[::1] biases,
+                          flt[::1] gradients,
+                          flt[::1] momentum,
+                          double gradient,
+                          int adadelta,
+                          double learning_rate,
+                          double alpha,
+                          flt rho,
+                          flt eps) nogil:
+    """
+    Perform a SGD update of the bias terms.
+    """
+
+    cdef int i, feature
+    cdef double feature_weight, local_learning_rate, sum_learning_rate, update
+
+    sum_learning_rate = 0.0
+
+    if adadelta:
+        # Ignore for now because I don't know how this works.
+        for i in range(start, stop):
+
+            feature = feature_indices.indices[i]
+            feature_weight = feature_indices.data[i]
+
+            gradients[feature] = rho * gradients[feature] + (1 - rho) * (feature_weight * gradient) ** 2
+            local_learning_rate = sqrt(momentum[feature] + eps) / sqrt(gradients[feature] + eps)
+            update = local_learning_rate * gradient * feature_weight
+            momentum[feature] = rho * momentum[feature] + (1 - rho) * update ** 2
+            biases[feature] -= update
+
+            # Lazy regularization: scale up by the regularization
+            # parameter.
+            biases[feature] *= (1.0 + alpha * local_learning_rate)
+
+            sum_learning_rate += local_learning_rate
+    else:
+        for i in range(start, stop):
+
+            feature = feature_indices.indices[i]
+            feature_weight = feature_indices.data[i]
+
+            local_learning_rate = learning_rate / sqrt(gradients[feature])
+            biases[feature] -= local_learning_rate * feature_weight * gradient
+            gradients[feature] += gradient ** 2
+
+            # Lazy regularization: scale up by the regularization
+            # parameter.
+            biases[feature] *= (1.0 + alpha * local_learning_rate)
+
+            sum_learning_rate += local_learning_rate
+
+    return sum_learning_rate
+
 
 cdef inline double update_features(CSRMatrix feature_indices,
                                    flt[:, ::1] features,
@@ -535,8 +592,15 @@ cdef void warp_update(double loss,
     user_start_index = user_features.get_row_start(user_id)
     user_stop_index = user_features.get_row_end(user_id)
 
+
+    # We know that the id-features are at the start_index, and all other
+    # features are afterwards. We'll call other features "group" features
+    # because they are not exclusive to an individual user or item.
+
+    # Start out by doing lazy updates to id-features. Easiest way to do this is
+    # to just pass start_index + 1 as the stop_index.
     avg_learning_rate += update_biases(item_features, positive_item_start_index,
-                                       positive_item_stop_index,
+                                       positive_item_start_index + 1,
                                        lightfm.item_biases, lightfm.item_bias_gradients,
                                        lightfm.item_bias_momentum,
                                        -loss,
@@ -546,6 +610,37 @@ cdef void warp_update(double loss,
                                        lightfm.rho,
                                        lightfm.eps)
     avg_learning_rate += update_biases(item_features, negative_item_start_index,
+                                       negative_item_start_index + 1,
+                                       lightfm.item_biases, lightfm.item_bias_gradients,
+                                       lightfm.item_bias_momentum,
+                                       loss,
+                                       lightfm.adadelta,
+                                       lightfm.learning_rate,
+                                       item_alpha,
+                                       lightfm.rho,
+                                       lightfm.eps)
+    avg_learning_rate += update_biases(user_features, user_start_index, user_start_index + 1,
+                                       lightfm.user_biases, lightfm.user_bias_gradients,
+                                       lightfm.user_bias_momentum,
+                                       loss,
+                                       lightfm.adadelta,
+                                       lightfm.learning_rate,
+                                       user_alpha,
+                                       lightfm.rho,
+                                       lightfm.eps)
+
+    # Next, we do slow updates on the dense features.
+    avg_learning_rate += update_biases_slow(item_features, positive_item_start_index + 1,
+                                       positive_item_stop_index,
+                                       lightfm.item_biases, lightfm.item_bias_gradients,
+                                       lightfm.item_bias_momentum,
+                                       -loss,
+                                       lightfm.adadelta,
+                                       lightfm.learning_rate,
+                                       item_alpha,
+                                       lightfm.rho,
+                                       lightfm.eps)
+    avg_learning_rate += update_biases_slow(item_features, negative_item_start_index + 1,
                                        negative_item_stop_index,
                                        lightfm.item_biases, lightfm.item_bias_gradients,
                                        lightfm.item_bias_momentum,
@@ -555,7 +650,7 @@ cdef void warp_update(double loss,
                                        item_alpha,
                                        lightfm.rho,
                                        lightfm.eps)
-    avg_learning_rate += update_biases(user_features, user_start_index, user_stop_index,
+    avg_learning_rate += update_biases_slow(user_features, user_start_index + 1, user_stop_index,
                                        lightfm.user_biases, lightfm.user_bias_gradients,
                                        lightfm.user_bias_momentum,
                                        loss,
