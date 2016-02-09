@@ -420,14 +420,6 @@ cdef double update_dense_biases(CSRMatrix feature_indices,
         biases[feature] -= local_learning_rate * (gradient + 2 * alpha * feature_weight)
         gradients[feature] += gradient ** 2
 
-        # Lazy regularization: scale up by the regularization
-        # parameter.
-        # biases[feature] *= (1.0 + alpha * local_learning_rate)
-
-        sum_learning_rate += local_learning_rate
-
-    return sum_learning_rate
-
 
 cdef inline double update_features(CSRMatrix feature_indices,
                                    flt[:, ::1] features,
@@ -489,8 +481,6 @@ cdef inline double update_features(CSRMatrix feature_indices,
     return sum_learning_rate
 
 
-
-
 cdef inline double update_dense_features(CSRMatrix feature_indices,
                                    flt[:, ::1] features,
                                    flt[:, ::1] gradients,
@@ -541,14 +531,6 @@ cdef inline double update_dense_features(CSRMatrix feature_indices,
         local_learning_rate = learning_rate / sqrt(gradients[feature, component])
         features[feature, component] -= local_learning_rate * (gradient + 2 * alpha * feature_weight)
         gradients[feature, component] += gradient ** 2
-
-        # Lazy regularization: scale up by the regularization
-        # parameter.
-        # features[feature, component] *= (1.0 + alpha * local_learning_rate)
-
-        sum_learning_rate += local_learning_rate
-
-    return sum_learning_rate
 
 
 cdef inline void update(double loss,
@@ -711,7 +693,7 @@ cdef void warp_update(double loss,
                                        lightfm.eps)
 
     # Next, we do slow updates on the dense features.
-    avg_learning_rate += update_dense_biases(user_features, user_group_id_start, user_group_id_end,
+    update_dense_biases(user_features, user_group_id_start, user_group_id_end,
                                        lightfm.user_biases, lightfm.user_bias_gradients,
                                        lightfm.user_bias_momentum,
                                        loss,
@@ -762,7 +744,7 @@ cdef void warp_update(double loss,
                                              lightfm.rho,
                                              lightfm.eps)
         # Then, the dense features
-        avg_learning_rate += update_dense_features(user_features, lightfm.user_features,
+        update_dense_features(user_features, lightfm.user_features,
                                              lightfm.user_feature_gradients,
                                              lightfm.user_feature_momentum,
                                              i, user_group_id_start, user_group_id_end,
@@ -774,7 +756,13 @@ cdef void warp_update(double loss,
                                              lightfm.rho,
                                              lightfm.eps)
 
-    avg_learning_rate /= ((lightfm.no_components + 1) * (user_stop_index - user_start_index)
+    # avg_learning_rate /= ((lightfm.no_components + 1) * (user_stop_index - user_start_index)
+    #                       + (lightfm.no_components + 1) *
+    #                       (positive_item_stop_index - positive_item_start_index)
+    #                       + (lightfm.no_components + 1)
+    #                       * (negative_item_stop_index - negative_item_start_index))
+
+    avg_learning_rate /= ((lightfm.no_components + 1)
                           + (lightfm.no_components + 1) *
                           (positive_item_stop_index - positive_item_start_index)
                           + (lightfm.no_components + 1)
