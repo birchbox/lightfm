@@ -18,7 +18,7 @@ class LightFM(object):
                  learning_schedule='adagrad',
                  loss='logistic',
                  learning_rate=0.05, rho=0.95, epsilon=1e-6,
-                 item_alpha=0.0, user_alpha=0.0):
+                 item_alpha=0.0, user_alpha=0.0, user_group_alpha=0.0):
         """
         Initialise the model.
 
@@ -71,6 +71,7 @@ class LightFM(object):
 
         assert item_alpha >= 0.0
         assert user_alpha >= 0.0
+        assert user_group_alpha >= 0
         assert no_components > 0
         assert k > 0
         assert n > 0
@@ -93,6 +94,7 @@ class LightFM(object):
 
         self.item_alpha = item_alpha
         self.user_alpha = user_alpha
+        self.user_group_alpha = user_group_alpha
 
         self._reset_state()
 
@@ -281,6 +283,7 @@ class LightFM(object):
         """
         Run an individual epoch.
         """
+        user_group_ids = np.arange(n_users, user_features.shape[1], dtype=np.int32)
 
         # Create shuffle indexes.
         shuffle_indices = np.arange(len(interactions.data), dtype=np.int32)
@@ -312,11 +315,13 @@ class LightFM(object):
                      interactions.row,
                      interactions.col,
                      interactions.data,
+                     user_group_ids,
                      shuffle_indices,
                      lightfm_data,
                      self.learning_rate,
                      self.item_alpha,
                      self.user_alpha,
+                     self.user_group_alpha,
                      num_threads)
         elif loss == 'bpr':
             fit_bpr(CSRMatrix(item_features),

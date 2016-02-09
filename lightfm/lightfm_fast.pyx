@@ -256,16 +256,30 @@ cdef inline void compute_representation(CSRMatrix features,
     for i in range(lightfm.no_components + 1):
         representation[i] = 0.0
 
-    for i in range(start_index, stop_index):
+    # Start by getting id-features
+    i = start_index
+
+    feature = features.indices[i]
+    feature_weight = features.data[i] * scale
+
+    for j in range(lightfm.no_components):
+
+        representation[j] += feature_weight * feature_embeddings[feature, j]
+
+    representation[lightfm.no_components] += feature_weight * feature_biases[feature]
+
+    # Then, get group features
+    for i in range(start_index + 1, stop_index):
 
         feature = features.indices[i]
-        feature_weight = features.data[i] * scale
+        feature_weight = features.data[i]
 
         for j in range(lightfm.no_components):
 
             representation[j] += feature_weight * feature_embeddings[feature, j]
 
         representation[lightfm.no_components] += feature_weight * feature_biases[feature]
+
 
 
 cdef inline flt compute_prediction_from_repr(flt *repr_1,
@@ -357,9 +371,9 @@ cdef double update_biases(CSRMatrix feature_indices,
 
     return sum_learning_rate
 
-cdef double update_biases_slow(CSRMatrix feature_indices,
-                          int start,
-                          int stop,
+cdef double update_dense_biases(CSRMatrix feature_indices,
+                          int group_id_start,
+                          int group_id_end,
                           flt[::1] biases,
                           flt[::1] gradients,
                           flt[::1] momentum,
@@ -378,39 +392,39 @@ cdef double update_biases_slow(CSRMatrix feature_indices,
 
     sum_learning_rate = 0.0
 
-    if adadelta:
-        # Ignore for now because I don't know how this works.
-        for i in range(start, stop):
+    # if adadelta:
+    #     # Ignore for now because I don't know how this works.
+    #     for i in range(start, stop):
 
-            feature = feature_indices.indices[i]
-            feature_weight = feature_indices.data[i]
+    #         feature = feature_indices.indices[i]
+    #         feature_weight = feature_indices.data[i]
 
-            gradients[feature] = rho * gradients[feature] + (1 - rho) * (feature_weight * gradient) ** 2
-            local_learning_rate = sqrt(momentum[feature] + eps) / sqrt(gradients[feature] + eps)
-            update = local_learning_rate * gradient * feature_weight
-            momentum[feature] = rho * momentum[feature] + (1 - rho) * update ** 2
-            biases[feature] -= update
+    #         gradients[feature] = rho * gradients[feature] + (1 - rho) * (feature_weight * gradient) ** 2
+    #         local_learning_rate = sqrt(momentum[feature] + eps) / sqrt(gradients[feature] + eps)
+    #         update = local_learning_rate * gradient * feature_weight
+    #         momentum[feature] = rho * momentum[feature] + (1 - rho) * update ** 2
+    #         biases[feature] -= update
 
-            # Lazy regularization: scale up by the regularization
-            # parameter.
-            biases[feature] *= (1.0 + alpha * local_learning_rate)
+    #         # Lazy regularization: scale up by the regularization
+    #         # parameter.
+    #         biases[feature] *= (1.0 + alpha * local_learning_rate)
 
-            sum_learning_rate += local_learning_rate
-    else:
-        for i in range(start, stop):
+    #         sum_learning_rate += local_learning_rate
+    # else:
+    for i in range(group_id_start, group_id_end):
 
-            feature = feature_indices.indices[i]
-            feature_weight = feature_indices.data[i]
+        feature = feature_indices.indices[i]
+        feature_weight = feature_indices.data[i]
 
-            local_learning_rate = learning_rate / sqrt(gradients[feature])
-            biases[feature] -= local_learning_rate * feature_weight * gradient
-            gradients[feature] += gradient ** 2
+        local_learning_rate = learning_rate / sqrt(gradients[feature])
+        biases[feature] -= local_learning_rate * (gradient + 2 * alpha * feature_weight)
+        gradients[feature] += gradient ** 2
 
-            # Lazy regularization: scale up by the regularization
-            # parameter.
-            biases[feature] *= (1.0 + alpha * local_learning_rate)
+        # Lazy regularization: scale up by the regularization
+        # parameter.
+        # biases[feature] *= (1.0 + alpha * local_learning_rate)
 
-            sum_learning_rate += local_learning_rate
+        sum_learning_rate += local_learning_rate
 
     return sum_learning_rate
 
@@ -471,6 +485,68 @@ cdef inline double update_features(CSRMatrix feature_indices,
             features[feature, component] *= (1.0 + alpha * local_learning_rate)
 
             sum_learning_rate += local_learning_rate
+
+    return sum_learning_rate
+
+
+
+
+cdef inline double update_dense_features(CSRMatrix feature_indices,
+                                   flt[:, ::1] features,
+                                   flt[:, ::1] gradients,
+                                   flt[:, ::1] momentum,
+                                   int component,
+                                   int group_id_start,
+                                   int group_id_end,
+                                   double gradient,
+                                   int adadelta,
+                                   double learning_rate,
+                                   double alpha,
+                                   flt rho,
+                                   flt eps) nogil:
+    """
+    Update feature vectors.
+    """
+
+    cdef int i, feature,
+    cdef double feature_weight, local_learning_rate, sum_learning_rate, update
+
+    sum_learning_rate = 0.0
+
+    # if adadelta:
+    #     for i in range(start, stop):
+
+    #         feature = feature_indices.indices[i]
+    #         feature_weight = feature_indices.data[i]
+
+    #         gradients[feature, component] = (rho * gradients[feature, component]
+    #                                          + (1 - rho) * (feature_weight * gradient) ** 2)
+    #         local_learning_rate = (sqrt(momentum[feature, component] + eps)
+    #                                / sqrt(gradients[feature, component] + eps))
+    #         update = local_learning_rate * gradient * feature_weight
+    #         momentum[feature, component] = rho * momentum[feature, component] + (1 - rho) * update ** 2
+    #         features[feature, component] -= update
+
+    #         # Lazy regularization: scale up by the regularization
+    #         # parameter.
+    #         features[feature, component] *= (1.0 + alpha * local_learning_rate)
+
+    #         sum_learning_rate += local_learning_rate
+    # else:
+    for i in range(group_id_start, group_id_end):
+
+        feature = feature_indices.indices[i]
+        feature_weight = feature_indices.data[i]
+
+        local_learning_rate = learning_rate / sqrt(gradients[feature, component])
+        features[feature, component] -= local_learning_rate * (gradient + 2 * alpha * feature_weight)
+        gradients[feature, component] += gradient ** 2
+
+        # Lazy regularization: scale up by the regularization
+        # parameter.
+        # features[feature, component] *= (1.0 + alpha * local_learning_rate)
+
+        sum_learning_rate += local_learning_rate
 
     return sum_learning_rate
 
@@ -564,12 +640,15 @@ cdef void warp_update(double loss,
                       int user_id,
                       int positive_item_id,
                       int negative_item_id,
+                      int user_group_id_start,
+                      int user_group_id_end,
                       flt *user_repr,
                       flt *pos_it_repr,
                       flt *neg_it_repr,
                       FastLightFM lightfm,
                       double item_alpha,
-                      double user_alpha) nogil:
+                      double user_alpha,
+                      double user_group_alpha) nogil:
     """
     Apply the gradient step.
     """
@@ -599,26 +678,6 @@ cdef void warp_update(double loss,
 
     # Start out by doing lazy updates to id-features. Easiest way to do this is
     # to just pass start_index + 1 as the stop_index.
-    avg_learning_rate += update_biases(item_features, positive_item_start_index,
-                                       positive_item_start_index + 1,
-                                       lightfm.item_biases, lightfm.item_bias_gradients,
-                                       lightfm.item_bias_momentum,
-                                       -loss,
-                                       lightfm.adadelta,
-                                       lightfm.learning_rate,
-                                       item_alpha,
-                                       lightfm.rho,
-                                       lightfm.eps)
-    avg_learning_rate += update_biases(item_features, negative_item_start_index,
-                                       negative_item_start_index + 1,
-                                       lightfm.item_biases, lightfm.item_bias_gradients,
-                                       lightfm.item_bias_momentum,
-                                       loss,
-                                       lightfm.adadelta,
-                                       lightfm.learning_rate,
-                                       item_alpha,
-                                       lightfm.rho,
-                                       lightfm.eps)
     avg_learning_rate += update_biases(user_features, user_start_index, user_start_index + 1,
                                        lightfm.user_biases, lightfm.user_bias_gradients,
                                        lightfm.user_bias_momentum,
@@ -629,8 +688,8 @@ cdef void warp_update(double loss,
                                        lightfm.rho,
                                        lightfm.eps)
 
-    # Next, we do slow updates on the dense features.
-    avg_learning_rate += update_biases_slow(item_features, positive_item_start_index + 1,
+    # Also, lazy updates on all item features (for now)
+    avg_learning_rate += update_biases(item_features, positive_item_start_index,
                                        positive_item_stop_index,
                                        lightfm.item_biases, lightfm.item_bias_gradients,
                                        lightfm.item_bias_momentum,
@@ -640,7 +699,7 @@ cdef void warp_update(double loss,
                                        item_alpha,
                                        lightfm.rho,
                                        lightfm.eps)
-    avg_learning_rate += update_biases_slow(item_features, negative_item_start_index + 1,
+    avg_learning_rate += update_biases(item_features, negative_item_start_index,
                                        negative_item_stop_index,
                                        lightfm.item_biases, lightfm.item_bias_gradients,
                                        lightfm.item_bias_momentum,
@@ -650,13 +709,15 @@ cdef void warp_update(double loss,
                                        item_alpha,
                                        lightfm.rho,
                                        lightfm.eps)
-    avg_learning_rate += update_biases_slow(user_features, user_start_index + 1, user_stop_index,
+
+    # Next, we do slow updates on the dense features.
+    avg_learning_rate += update_dense_biases(user_features, user_group_id_start, user_group_id_end,
                                        lightfm.user_biases, lightfm.user_bias_gradients,
                                        lightfm.user_bias_momentum,
                                        loss,
                                        lightfm.adadelta,
                                        lightfm.learning_rate,
-                                       user_alpha,
+                                       user_group_alpha,
                                        lightfm.rho,
                                        lightfm.eps)
 
@@ -687,10 +748,24 @@ cdef void warp_update(double loss,
                                              item_alpha,
                                              lightfm.rho,
                                              lightfm.eps)
+
+        # Again, just do sparse lazy updates first
         avg_learning_rate += update_features(user_features, lightfm.user_features,
                                              lightfm.user_feature_gradients,
                                              lightfm.user_feature_momentum,
-                                             i, user_start_index, user_stop_index,
+                                             i, user_start_index, user_start_index + 1,
+                                             loss * (negative_item_component -
+                                                     positive_item_component),
+                                             lightfm.adadelta,
+                                             lightfm.learning_rate,
+                                             user_alpha,
+                                             lightfm.rho,
+                                             lightfm.eps)
+        # Then, the dense features
+        avg_learning_rate += update_dense_features(user_features, lightfm.user_features,
+                                             lightfm.user_feature_gradients,
+                                             lightfm.user_feature_momentum,
+                                             i, user_group_id_start, user_group_id_end,
                                              loss * (negative_item_component -
                                                      positive_item_component),
                                              lightfm.adadelta,
@@ -713,9 +788,10 @@ cdef void warp_update(double loss,
 
 cdef void regularize(FastLightFM lightfm,
                      double item_alpha,
-                     double user_alpha) nogil:
+                     double user_alpha,
+                     int user_group_id_start) nogil:
     """
-    Apply accumulated L2 regularization to all features.
+    Apply accumulated L2 regularization to all features, except the dense features.
     """
 
     cdef int i, j
@@ -728,7 +804,8 @@ cdef void regularize(FastLightFM lightfm,
 
         lightfm.item_biases[i] *= lightfm.item_scale
 
-    for i in range(no_users):
+    # Only go up to the start of the group ids
+    for i in range(user_group_id_start):
         for j in range(lightfm.no_components):
             lightfm.user_features[i, j] *= lightfm.user_scale
         lightfm.user_biases[i] *= lightfm.user_scale
@@ -737,87 +814,87 @@ cdef void regularize(FastLightFM lightfm,
     lightfm.user_scale = 1.0
 
 
-def fit_logistic(CSRMatrix item_features,
-                 CSRMatrix user_features,
-                 int[::1] user_ids,
-                 int[::1] item_ids,
-                 flt[::1] Y,
-                 int[::1] shuffle_indices,
-                 FastLightFM lightfm,
-                 double learning_rate,
-                 double item_alpha,
-                 double user_alpha,
-                 int num_threads):
-    """
-    Fit the LightFM model.
-    """
+# def fit_logistic(CSRMatrix item_features,
+#                  CSRMatrix user_features,
+#                  int[::1] user_ids,
+#                  int[::1] item_ids,
+#                  flt[::1] Y,
+#                  int[::1] shuffle_indices,
+#                  FastLightFM lightfm,
+#                  double learning_rate,
+#                  double item_alpha,
+#                  double user_alpha,
+#                  int num_threads):
+#     """
+#     Fit the LightFM model.
+#     """
 
-    cdef int i, no_examples, user_id, item_id, row
-    cdef double prediction, loss
-    cdef int y
-    cdef flt y_row
-    cdef flt *user_repr
-    cdef flt *it_repr
+#     cdef int i, no_examples, user_id, item_id, row
+#     cdef double prediction, loss
+#     cdef int y
+#     cdef flt y_row
+#     cdef flt *user_repr
+#     cdef flt *it_repr
 
-    no_examples = Y.shape[0]
+#     no_examples = Y.shape[0]
 
-    with nogil, parallel(num_threads=num_threads):
+#     with nogil, parallel(num_threads=num_threads):
 
-        user_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
-        it_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
+#         user_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
+#         it_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
 
-        for i in prange(no_examples):
+#         for i in prange(no_examples):
 
-            row = shuffle_indices[i]
+#             row = shuffle_indices[i]
 
-            user_id = user_ids[row]
-            item_id = item_ids[row]
+#             user_id = user_ids[row]
+#             item_id = item_ids[row]
 
-            compute_representation(user_features,
-                                   lightfm.user_features,
-                                   lightfm.user_biases,
-                                   lightfm,
-                                   user_id,
-                                   lightfm.user_scale,
-                                   user_repr)
-            compute_representation(item_features,
-                                   lightfm.item_features,
-                                   lightfm.item_biases,
-                                   lightfm,
-                                   item_id,
-                                   lightfm.item_scale,
-                                   it_repr)
+#             compute_representation(user_features,
+#                                    lightfm.user_features,
+#                                    lightfm.user_biases,
+#                                    lightfm,
+#                                    user_id,
+#                                    lightfm.user_scale,
+#                                    user_repr)
+#             compute_representation(item_features,
+#                                    lightfm.item_features,
+#                                    lightfm.item_biases,
+#                                    lightfm,
+#                                    item_id,
+#                                    lightfm.item_scale,
+#                                    it_repr)
 
-            prediction = sigmoid(compute_prediction_from_repr(user_repr,
-                                                              it_repr,
-                                                              lightfm.no_components))
+#             prediction = sigmoid(compute_prediction_from_repr(user_repr,
+#                                                               it_repr,
+#                                                               lightfm.no_components))
 
-            # Any value less or equal to zero
-            # is a negative interaction.
-            y_row = Y[row]
-            if y_row <= 0:
-                y = 0
-            else:
-                y = 1
+#             # Any value less or equal to zero
+#             # is a negative interaction.
+#             y_row = Y[row]
+#             if y_row <= 0:
+#                 y = 0
+#             else:
+#                 y = 1
 
-            loss = (prediction - y)
-            update(loss,
-                   item_features,
-                   user_features,
-                   user_id,
-                   item_id,
-                   user_repr,
-                   it_repr,
-                   lightfm,
-                   item_alpha,
-                   user_alpha)
+#             loss = (prediction - y)
+#             update(loss,
+#                    item_features,
+#                    user_features,
+#                    user_id,
+#                    item_id,
+#                    user_repr,
+#                    it_repr,
+#                    lightfm,
+#                    item_alpha,
+#                    user_alpha)
 
-        free(user_repr)
-        free(it_repr)
+#         free(user_repr)
+#         free(it_repr)
 
-    regularize(lightfm,
-               item_alpha,
-               user_alpha)
+#     regularize(lightfm,
+#                item_alpha,
+#                user_alpha)
 
 
 def fit_warp(CSRMatrix item_features,
@@ -826,11 +903,14 @@ def fit_warp(CSRMatrix item_features,
              int[::1] user_ids,
              int[::1] item_ids,
              flt[::1] Y,
+             int user_group_id_start,
+             int user_group_id_end,
              int[::1] shuffle_indices,
              FastLightFM lightfm,
              double learning_rate,
              double item_alpha,
              double user_alpha,
+             double user_group_alpha,
              int num_threads):
     """
     Fit the model using the WARP loss.
@@ -933,12 +1013,15 @@ def fit_warp(CSRMatrix item_features,
                                 user_id,
                                 positive_item_id,
                                 negative_item_id,
+                                user_group_id_start,
+                                user_group_id_end,
                                 user_repr,
                                 pos_it_repr,
                                 neg_it_repr,
                                 lightfm,
                                 item_alpha,
-                                user_alpha)
+                                user_alpha,
+                                user_group_alpha)
                     break
 
         free(user_repr)
@@ -947,278 +1030,279 @@ def fit_warp(CSRMatrix item_features,
 
     regularize(lightfm,
                item_alpha,
-               user_alpha)
+               user_alpha,
+               user_group_id_start)
 
 
-def fit_warp_kos(CSRMatrix item_features,
-                 CSRMatrix user_features,
-                 CSRMatrix data,
-                 int[::1] user_ids,
-                 int[::1] item_ids,
-                 flt[::1] Y,
-                 int[::1] shuffle_indices,
-                 FastLightFM lightfm,
-                 double learning_rate,
-                 double item_alpha,
-                 double user_alpha,
-                 int k,
-                 int n,
-                 int num_threads):
-    """
-    Fit the model using the WARP loss.
-    """
+# def fit_warp_kos(CSRMatrix item_features,
+#                  CSRMatrix user_features,
+#                  CSRMatrix data,
+#                  int[::1] user_ids,
+#                  int[::1] item_ids,
+#                  flt[::1] Y,
+#                  int[::1] shuffle_indices,
+#                  FastLightFM lightfm,
+#                  double learning_rate,
+#                  double item_alpha,
+#                  double user_alpha,
+#                  int k,
+#                  int n,
+#                  int num_threads):
+#     """
+#     Fit the model using the WARP loss.
+#     """
 
-    cdef int i, j, no_examples, user_id, positive_item_id, gamma, max_sampled
-    cdef int negative_item_id, sampled, row, sampled_positive_item_id, negative_item_index
-    cdef int user_pids_start, user_pids_stop, no_positives, POS_SAMPLES
-    cdef double positive_prediction, negative_prediction, violation, weight
-    cdef double loss, MAX_LOSS, sampled_positive_prediction
-    cdef flt *user_repr
-    cdef flt *pos_it_repr
-    cdef flt *neg_it_repr
-    cdef Pair *pos_pairs
-    cdef unsigned int[::1] random_states
+#     cdef int i, j, no_examples, user_id, positive_item_id, gamma, max_sampled
+#     cdef int negative_item_id, sampled, row, sampled_positive_item_id, negative_item_index
+#     cdef int user_pids_start, user_pids_stop, no_positives, POS_SAMPLES
+#     cdef double positive_prediction, negative_prediction, violation, weight
+#     cdef double loss, MAX_LOSS, sampled_positive_prediction
+#     cdef flt *user_repr
+#     cdef flt *pos_it_repr
+#     cdef flt *neg_it_repr
+#     cdef Pair *pos_pairs
+#     cdef unsigned int[::1] random_states
 
-    random_states = np.random.randint(0,
-                                      np.iinfo(np.int32).max,
-                                      size=num_threads).astype(np.uint32)
+#     random_states = np.random.randint(0,
+#                                       np.iinfo(np.int32).max,
+#                                       size=num_threads).astype(np.uint32)
 
-    no_examples = user_ids.shape[0]
-    gamma = 10
-    MAX_LOSS = 10.0
+#     no_examples = user_ids.shape[0]
+#     gamma = 10
+#     MAX_LOSS = 10.0
 
-    max_sampled = item_features.rows / gamma
+#     max_sampled = item_features.rows / gamma
 
-    with nogil, parallel(num_threads=num_threads):
+#     with nogil, parallel(num_threads=num_threads):
 
-        user_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
-        pos_it_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
-        neg_it_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
-        pos_pairs = <Pair*>malloc(sizeof(Pair) * n)
+#         user_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
+#         pos_it_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
+#         neg_it_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
+#         pos_pairs = <Pair*>malloc(sizeof(Pair) * n)
 
-        for i in prange(no_examples):
-            row = shuffle_indices[i]
-            user_id = user_ids[row]
+#         for i in prange(no_examples):
+#             row = shuffle_indices[i]
+#             user_id = user_ids[row]
 
-            compute_representation(user_features,
-                                   lightfm.user_features,
-                                   lightfm.user_biases,
-                                   lightfm,
-                                   user_id,
-                                   lightfm.user_scale,
-                                   user_repr)
+#             compute_representation(user_features,
+#                                    lightfm.user_features,
+#                                    lightfm.user_biases,
+#                                    lightfm,
+#                                    user_id,
+#                                    lightfm.user_scale,
+#                                    user_repr)
 
-            user_pids_start = data.get_row_start(user_id)
-            user_pids_stop = data.get_row_end(user_id)
+#             user_pids_start = data.get_row_start(user_id)
+#             user_pids_stop = data.get_row_end(user_id)
 
-            if user_pids_stop == user_pids_start:
-                continue
+#             if user_pids_stop == user_pids_start:
+#                 continue
 
-            # Sample k-th positive item
-            no_positives = int_min(n, user_pids_stop - user_pids_start)
-            for j in range(no_positives):
-                sampled_positive_item_id = data.indices[sample_range(user_pids_start,
-                                                                     user_pids_stop,
-                                                                     &random_states[openmp.omp_get_thread_num()])]
+#             # Sample k-th positive item
+#             no_positives = int_min(n, user_pids_stop - user_pids_start)
+#             for j in range(no_positives):
+#                 sampled_positive_item_id = data.indices[sample_range(user_pids_start,
+#                                                                      user_pids_stop,
+#                                                                      &random_states[openmp.omp_get_thread_num()])]
 
-                compute_representation(item_features,
-                                       lightfm.item_features,
-                                       lightfm.item_biases,
-                                       lightfm,
-                                       sampled_positive_item_id,
-                                       lightfm.item_scale,
-                                       pos_it_repr)
+#                 compute_representation(item_features,
+#                                        lightfm.item_features,
+#                                        lightfm.item_biases,
+#                                        lightfm,
+#                                        sampled_positive_item_id,
+#                                        lightfm.item_scale,
+#                                        pos_it_repr)
 
-                sampled_positive_prediction = compute_prediction_from_repr(user_repr,
-                                                                           pos_it_repr,
-                                                                           lightfm.no_components)
+#                 sampled_positive_prediction = compute_prediction_from_repr(user_repr,
+#                                                                            pos_it_repr,
+#                                                                            lightfm.no_components)
 
-                pos_pairs[j].idx = sampled_positive_item_id
-                pos_pairs[j].val = sampled_positive_prediction
+#                 pos_pairs[j].idx = sampled_positive_item_id
+#                 pos_pairs[j].val = sampled_positive_prediction
 
-            qsort(pos_pairs,
-                  no_positives,
-                  sizeof(Pair),
-                  reverse_pair_compare)
+#             qsort(pos_pairs,
+#                   no_positives,
+#                   sizeof(Pair),
+#                   reverse_pair_compare)
 
-            positive_item_id = pos_pairs[int_min(k, no_positives) - 1].idx
-            positive_prediction = pos_pairs[int_min(k, no_positives) - 1].val
+#             positive_item_id = pos_pairs[int_min(k, no_positives) - 1].idx
+#             positive_prediction = pos_pairs[int_min(k, no_positives) - 1].val
 
-            compute_representation(item_features,
-                                   lightfm.item_features,
-                                   lightfm.item_biases,
-                                   lightfm,
-                                   positive_item_id,
-                                   lightfm.item_scale,
-                                   pos_it_repr)
+#             compute_representation(item_features,
+#                                    lightfm.item_features,
+#                                    lightfm.item_biases,
+#                                    lightfm,
+#                                    positive_item_id,
+#                                    lightfm.item_scale,
+#                                    pos_it_repr)
 
-            # Move on to the WARP step
-            violation = 0
-            sampled = 0
+#             # Move on to the WARP step
+#             violation = 0
+#             sampled = 0
 
-            while sampled < max_sampled:
+#             while sampled < max_sampled:
 
-                sampled = sampled + 1
-                negative_item_id = (rand_r(&random_states[openmp.omp_get_thread_num()])
-                                    % item_features.rows)
+#                 sampled = sampled + 1
+#                 negative_item_id = (rand_r(&random_states[openmp.omp_get_thread_num()])
+#                                     % item_features.rows)
 
-                # Sample again if interaction counts for negative item are greater than or
-                # equal to positive item
-                negative_item_index = find_item_index(user_id, negative_item_id, data)
-                if negative_item_index != -1:
-                    if Y[negative_item_index] >= Y[row]:
-                        continue
+#                 # Sample again if interaction counts for negative item are greater than or
+#                 # equal to positive item
+#                 negative_item_index = find_item_index(user_id, negative_item_id, data)
+#                 if negative_item_index != -1:
+#                     if Y[negative_item_index] >= Y[row]:
+#                         continue
 
-                compute_representation(item_features,
-                                       lightfm.item_features,
-                                       lightfm.item_biases,
-                                       lightfm,
-                                       negative_item_id,
-                                       lightfm.item_scale,
-                                       neg_it_repr)
+#                 compute_representation(item_features,
+#                                        lightfm.item_features,
+#                                        lightfm.item_biases,
+#                                        lightfm,
+#                                        negative_item_id,
+#                                        lightfm.item_scale,
+#                                        neg_it_repr)
 
-                negative_prediction = compute_prediction_from_repr(user_repr,
-                                                                   neg_it_repr,
-                                                                   lightfm.no_components)
+#                 negative_prediction = compute_prediction_from_repr(user_repr,
+#                                                                    neg_it_repr,
+#                                                                    lightfm.no_components)
 
-                if negative_prediction > positive_prediction - 1:
+#                 if negative_prediction > positive_prediction - 1:
 
-                    weight = log(floor((item_features.rows - 1) / sampled))
-                    violation = 1 - positive_prediction + negative_prediction
-                    loss = weight * violation
+#                     weight = log(floor((item_features.rows - 1) / sampled))
+#                     violation = 1 - positive_prediction + negative_prediction
+#                     loss = weight * violation
 
-                    # Clip gradients for numerical stability.
-                    if loss > MAX_LOSS:
-                        loss = MAX_LOSS
+#                     # Clip gradients for numerical stability.
+#                     if loss > MAX_LOSS:
+#                         loss = MAX_LOSS
 
-                    warp_update(loss,
-                                item_features,
-                                user_features,
-                                user_id,
-                                positive_item_id,
-                                negative_item_id,
-                                user_repr,
-                                pos_it_repr,
-                                neg_it_repr,
-                                lightfm,
-                                item_alpha,
-                                user_alpha)
-                    break
+#                     warp_update(loss,
+#                                 item_features,
+#                                 user_features,
+#                                 user_id,
+#                                 positive_item_id,
+#                                 negative_item_id,
+#                                 user_repr,
+#                                 pos_it_repr,
+#                                 neg_it_repr,
+#                                 lightfm,
+#                                 item_alpha,
+#                                 user_alpha)
+#                     break
 
-        free(user_repr)
-        free(pos_it_repr)
-        free(neg_it_repr)
-        free(pos_pairs)
+#         free(user_repr)
+#         free(pos_it_repr)
+#         free(neg_it_repr)
+#         free(pos_pairs)
 
-    regularize(lightfm,
-               item_alpha,
-               user_alpha)
-
-
-def fit_bpr(CSRMatrix item_features,
-            CSRMatrix user_features,
-            CSRMatrix interactions,
-            int[::1] user_ids,
-            int[::1] item_ids,
-            flt[::1] Y,
-            int[::1] shuffle_indices,
-            FastLightFM lightfm,
-            double learning_rate,
-            double item_alpha,
-            double user_alpha,
-            int num_threads):
-    """
-    Fit the model using the BPR loss.
-    """
-
-    cdef int i, no_examples, user_id, positive_item_id
-    cdef int negative_item_id, sampled, row, negative_item_index
-    cdef double positive_prediction, negative_prediction
-    cdef unsigned int[::1] random_states
-    cdef flt *user_repr
-    cdef flt *pos_it_repr
-    cdef flt *neg_it_repr
-
-    random_states = np.random.randint(0,
-                                      np.iinfo(np.int32).max,
-                                      size=num_threads).astype(np.uint32)
-
-    no_examples = Y.shape[0]
-
-    with nogil, parallel(num_threads=num_threads):
-
-        user_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
-        pos_it_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
-        neg_it_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
-
-        for i in prange(no_examples):
-            row = shuffle_indices[i]
-
-            if not Y[row] > 0:
-                continue
-
-            user_id = user_ids[row]
-            positive_item_id = item_ids[row]
-
-            while True:
-                negative_item_id = (rand_r(&random_states[openmp.omp_get_thread_num()])
-                                    % item_features.rows)
-
-                negative_item_index = find_item_index(user_id, negative_item_id, interactions)
-                if negative_item_index == -1 or Y[negative_item_index] < Y[row]:
-                    # Negative item is truly negative compared to positive item.
-                    break
+#     regularize(lightfm,
+#                item_alpha,
+#                user_alpha)
 
 
-            compute_representation(user_features,
-                                   lightfm.user_features,
-                                   lightfm.user_biases,
-                                   lightfm,
-                                   user_id,
-                                   lightfm.user_scale,
-                                   user_repr)
-            compute_representation(item_features,
-                                   lightfm.item_features,
-                                   lightfm.item_biases,
-                                   lightfm,
-                                   positive_item_id,
-                                   lightfm.item_scale,
-                                   pos_it_repr)
-            compute_representation(item_features,
-                                   lightfm.item_features,
-                                   lightfm.item_biases,
-                                   lightfm,
-                                   negative_item_id,
-                                   lightfm.item_scale,
-                                   neg_it_repr)
+# def fit_bpr(CSRMatrix item_features,
+#             CSRMatrix user_features,
+#             CSRMatrix interactions,
+#             int[::1] user_ids,
+#             int[::1] item_ids,
+#             flt[::1] Y,
+#             int[::1] shuffle_indices,
+#             FastLightFM lightfm,
+#             double learning_rate,
+#             double item_alpha,
+#             double user_alpha,
+#             int num_threads):
+#     """
+#     Fit the model using the BPR loss.
+#     """
 
-            positive_prediction = compute_prediction_from_repr(user_repr,
-                                                               pos_it_repr,
-                                                               lightfm.no_components)
-            negative_prediction = compute_prediction_from_repr(user_repr,
-                                                               neg_it_repr,
-                                                               lightfm.no_components)
+#     cdef int i, no_examples, user_id, positive_item_id
+#     cdef int negative_item_id, sampled, row, negative_item_index
+#     cdef double positive_prediction, negative_prediction
+#     cdef unsigned int[::1] random_states
+#     cdef flt *user_repr
+#     cdef flt *pos_it_repr
+#     cdef flt *neg_it_repr
 
-            warp_update(sigmoid(positive_prediction - negative_prediction),
-                        item_features,
-                        user_features,
-                        user_id,
-                        positive_item_id,
-                        negative_item_id,
-                        user_repr,
-                        pos_it_repr,
-                        neg_it_repr,
-                        lightfm,
-                        item_alpha,
-                        user_alpha)
+#     random_states = np.random.randint(0,
+#                                       np.iinfo(np.int32).max,
+#                                       size=num_threads).astype(np.uint32)
 
-        free(user_repr)
-        free(pos_it_repr)
-        free(neg_it_repr)
+#     no_examples = Y.shape[0]
 
-    regularize(lightfm,
-               item_alpha,
-               user_alpha)
+#     with nogil, parallel(num_threads=num_threads):
+
+#         user_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
+#         pos_it_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
+#         neg_it_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
+
+#         for i in prange(no_examples):
+#             row = shuffle_indices[i]
+
+#             if not Y[row] > 0:
+#                 continue
+
+#             user_id = user_ids[row]
+#             positive_item_id = item_ids[row]
+
+#             while True:
+#                 negative_item_id = (rand_r(&random_states[openmp.omp_get_thread_num()])
+#                                     % item_features.rows)
+
+#                 negative_item_index = find_item_index(user_id, negative_item_id, interactions)
+#                 if negative_item_index == -1 or Y[negative_item_index] < Y[row]:
+#                     # Negative item is truly negative compared to positive item.
+#                     break
+
+
+#             compute_representation(user_features,
+#                                    lightfm.user_features,
+#                                    lightfm.user_biases,
+#                                    lightfm,
+#                                    user_id,
+#                                    lightfm.user_scale,
+#                                    user_repr)
+#             compute_representation(item_features,
+#                                    lightfm.item_features,
+#                                    lightfm.item_biases,
+#                                    lightfm,
+#                                    positive_item_id,
+#                                    lightfm.item_scale,
+#                                    pos_it_repr)
+#             compute_representation(item_features,
+#                                    lightfm.item_features,
+#                                    lightfm.item_biases,
+#                                    lightfm,
+#                                    negative_item_id,
+#                                    lightfm.item_scale,
+#                                    neg_it_repr)
+
+#             positive_prediction = compute_prediction_from_repr(user_repr,
+#                                                                pos_it_repr,
+#                                                                lightfm.no_components)
+#             negative_prediction = compute_prediction_from_repr(user_repr,
+#                                                                neg_it_repr,
+#                                                                lightfm.no_components)
+
+#             warp_update(sigmoid(positive_prediction - negative_prediction),
+#                         item_features,
+#                         user_features,
+#                         user_id,
+#                         positive_item_id,
+#                         negative_item_id,
+#                         user_repr,
+#                         pos_it_repr,
+#                         neg_it_repr,
+#                         lightfm,
+#                         item_alpha,
+#                         user_alpha)
+
+#         free(user_repr)
+#         free(pos_it_repr)
+#         free(neg_it_repr)
+
+#     regularize(lightfm,
+#                item_alpha,
+#                user_alpha)
 
 
 def predict_lightfm(CSRMatrix item_features,
