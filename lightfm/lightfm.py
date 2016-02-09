@@ -242,6 +242,9 @@ class LightFM(object):
         interactions = interactions.tocoo()
 
         n_users, n_items = interactions.shape
+        user_group_id_start = n_users
+        user_group_id_end = user_features.shape[1]
+
         (user_features,
          item_features) = self._construct_feature_matrices(n_users,
                                                            n_items,
@@ -275,18 +278,19 @@ class LightFM(object):
             self._run_epoch(item_features,
                             user_features,
                             interactions,
+                            user_group_id_start,
+                            user_group_id_end,
                             num_threads,
                             self.loss)
 
         return self
 
 
-    def _run_epoch(self, item_features, user_features, interactions, num_threads, loss):
+    def _run_epoch(self, item_features, user_features, interactions,
+                   user_group_id_start, user_group_id_end, num_threads, loss):
         """
         Run an individual epoch.
         """
-        user_group_id_start = n_users
-        user_group_id_end = user_features.shape[1]
 
         # Create shuffle indexes.
         shuffle_indices = np.arange(len(interactions.data), dtype=np.int32)
