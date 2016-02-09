@@ -1,14 +1,12 @@
 from __future__ import print_function
-
 import numpy as np
-
 import scipy.sparse as sp
-
 from .lightfm_fast import (CSRMatrix, FastLightFM,
                            fit_logistic, predict_lightfm,
                            fit_warp, fit_bpr, fit_warp_kos,
                            item_to_item_lightfm,
-                           test_find_func)
+                           user_norms_lightfm, item_norms_lightfm,
+                           __test_find_func)
 
 
 CYTHON_DTYPE = np.float32
@@ -98,6 +96,7 @@ class LightFM(object):
 
         self._reset_state()
 
+
     def _reset_state(self):
 
         self.item_embeddings = None
@@ -113,6 +112,7 @@ class LightFM(object):
         self.user_biases = None
         self.user_bias_gradients = None
         self.user_bias_momentum = None
+
 
     def _initialize(self, no_components, no_item_features, no_user_features):
         """
@@ -142,6 +142,7 @@ class LightFM(object):
             self.item_bias_gradients += 1
             self.user_embedding_gradients += 1
             self.user_bias_gradients += 1
+
 
     def _construct_feature_matrices(self, n_users, n_items, user_features,
                                     item_features):
@@ -176,6 +177,7 @@ class LightFM(object):
 
         return user_features, item_features
 
+
     def _get_positives_lookup_matrix(self, interactions):
 
         mat = interactions.tocsr()
@@ -185,12 +187,14 @@ class LightFM(object):
         else:
             return mat
 
+
     def _to_cython_dtype(self, mat):
 
         if mat.dtype != CYTHON_DTYPE:
             return mat.astype(CYTHON_DTYPE)
         else:
             return mat
+
 
     def fit(self, interactions, user_features=None, item_features=None,
             epochs=1, num_threads=1, verbose=False):
@@ -204,6 +208,7 @@ class LightFM(object):
                                 epochs=epochs,
                                 num_threads=num_threads,
                                 verbose=verbose)
+
 
     def fit_partial(self, interactions, user_features=None, item_features=None,
                     epochs=1, num_threads=1, verbose=False):
@@ -270,6 +275,7 @@ class LightFM(object):
                             self.loss)
 
         return self
+
 
     def _run_epoch(self, item_features, user_features, interactions, num_threads, loss):
         """
@@ -351,6 +357,7 @@ class LightFM(object):
                          self.user_alpha,
                          num_threads)
 
+
     def predict(self, user_ids, item_ids, item_features=None, user_features=None, num_threads=1, bias=1):
         """
         Predict the probability of a positive interaction.
@@ -415,9 +422,10 @@ class LightFM(object):
 
         return predictions
 
+
     def item_to_item(self, n_users, item_ids, item_features=None, bias=1):
         """
-        Calcualte dot product of every item embedding with every other item embedding.
+        Calculate dot product of every item embedding with every other item embedding.
 
         Arguments:
         - int n_users: number of users in original dataset. Kind of odd, but need to include
@@ -474,7 +482,97 @@ class LightFM(object):
         return predictions
 
 
-    def testing(self, interactions, user_id=0, positive_item_index=60, negative_item_id=0,
+    def get_user_norms(self, user_ids, user_features=None, num_threads=1):
+
+        # Must have a trained model
+        assert self.user_embeddings is not None
+        assert self.item_embeddings is not None
+
+        n_users = user_ids.max() + 1
+
+        (user_features,
+        item_features) = self._construct_feature_matrices(n_users,
+                                                          1,
+                                                          user_features,
+                                                          None)
+
+        user_features = self._to_cython_dtype(user_features)
+
+        lightfm_data = FastLightFM(self.item_embeddings,
+                                   self.item_embedding_gradients,
+                                   self.item_embedding_momentum,
+                                   self.item_biases,
+                                   self.item_bias_gradients,
+                                   self.item_bias_momentum,
+                                   self.user_embeddings,
+                                   self.user_embedding_gradients,
+                                   self.user_embedding_momentum,
+                                   self.user_biases,
+                                   self.user_bias_gradients,
+                                   self.user_bias_momentum,
+                                   self.no_components,
+                                   int(self.learning_schedule == 'adadelta'),
+                                   self.learning_rate,
+                                   self.rho,
+                                   self.epsilon)
+
+        user_norms = np.empty(len(user_ids), dtype=np.float64)
+
+        user_norms_lightfm(CSRMatrix(user_features),
+                           user_ids,
+                           user_norms,
+                           lightfm_data,
+                           num_threads)
+
+        return np.sqrt(user_norms)
+
+
+
+    def get_item_norms(self, item_ids, item_features=None, num_threads=1):
+
+        # Must have a trained model
+        assert self.user_embeddings is not None
+        assert self.item_embeddings is not None
+
+        n_items = item_ids.max() + 1
+
+        (user_features,
+        item_features) = self._construct_feature_matrices(1,
+                                                          n_items,
+                                                          None,
+                                                          item_features)
+
+        item_features = self._to_cython_dtype(item_features)
+
+        lightfm_data = FastLightFM(self.item_embeddings,
+                                   self.item_embedding_gradients,
+                                   self.item_embedding_momentum,
+                                   self.item_biases,
+                                   self.item_bias_gradients,
+                                   self.item_bias_momentum,
+                                   self.user_embeddings,
+                                   self.user_embedding_gradients,
+                                   self.user_embedding_momentum,
+                                   self.user_biases,
+                                   self.user_bias_gradients,
+                                   self.user_bias_momentum,
+                                   self.no_components,
+                                   int(self.learning_schedule == 'adadelta'),
+                                   self.learning_rate,
+                                   self.rho,
+                                   self.epsilon)
+
+        item_norms = np.empty(len(item_ids), dtype=np.float64)
+
+        item_norms_lightfm(CSRMatrix(item_features),
+                           item_ids,
+                           item_norms,
+                           lightfm_data,
+                           num_threads)
+
+        return np.sqrt(item_norms)
+
+    def __testing(self, interactions, user_id=0, positive_item_index=60, negative_item_id=0,
                 user_features=None, item_features=None,
                 epochs=1, num_threads=1, verbose=False):
         """

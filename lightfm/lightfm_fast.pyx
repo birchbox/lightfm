@@ -207,9 +207,12 @@ cdef inline int in_positives(int item_id, int user_id, CSRMatrix interactions) n
     else:
         return 1
 
-cdef inline int find_item_index(int user_id, int item_id, CSRMatrix interactions) nogil:
 
-    # Note: I don't really know what I'm doing, but this seems to work
+cdef inline int find_item_index(int user_id, int item_id, CSRMatrix interactions) nogil:
+    """Given a user_id and item_id, grab the interactions index.
+    Used to find the data value for that user_id + item_id combo.
+    Note: I don't really know what I'm doing, but this seems to work
+    """
 
     cdef void *idx
     cdef int *i
@@ -231,25 +234,6 @@ cdef inline int find_item_index(int user_id, int item_id, CSRMatrix interactions
         return_i = <int> (i - &interactions.indices[start_idx])
         return return_i + start_idx
 
-# cdef inline int is_larger(int user_id, int negative_item_id, flt positive_item_val, CSRMatrix interactions) nogil:
-
-#     cdef int value_pass, c, start_idx, stop_idx
-
-#     start_idx = interactions.get_row_start(user_id)
-#     stop_idx = interactions.get_row_end(user_id)
-#     value_pass = 0
-
-#     while c < stop_idx and c >= start_idx:
-#         if interactions.indices[c] == negative_item_id:
-#             if interactions.data[c] >= positive_item_val:
-#                 # printf('Positive item count: %d', positive_item_val)
-#                 # printf('Negative item count: %d', interactions.data[c])
-#                 value_pass = 1
-#                 continue
-#             continue
-#         c = c + 1
-
-#     return value_pass
 
 cdef inline void compute_representation(CSRMatrix features,
                                         flt[:, ::1] feature_embeddings,
@@ -284,64 +268,35 @@ cdef inline void compute_representation(CSRMatrix features,
         representation[lightfm.no_components] += feature_weight * feature_biases[feature]
 
 
-cdef inline flt compute_prediction_from_repr(flt *user_repr,
-                                             flt *item_repr,
+cdef inline flt compute_prediction_from_repr(flt *repr_1,
+                                             flt *repr_2,
                                              int no_components) nogil:
+    """Add biases and take latent factor dot product for two representations"""
 
     cdef int i
     cdef flt result
 
     # Biases
-    result = user_repr[no_components] + item_repr[no_components]
+    result = repr_1[no_components] + repr_2[no_components]
 
     # Latent factor dot product
     for i in range(no_components):
-        result += user_repr[i] * item_repr[i]
+        result += repr_1[i] * repr_2[i]
 
     return result
 
 
-cdef inline flt compute_prediction_from_repr_nobias(flt *user_repr,
-                                             flt *item_repr,
-                                             int no_components) nogil:
+cdef inline flt compute_prediction_from_repr_nobias(flt *repr_1,
+                                                    flt *repr_2,
+                                                    int no_components) nogil:
+    """Don't include bias term when calculating prediction."""
 
     cdef int i
     cdef flt result
 
     # Latent factor dot product
     for i in range(no_components):
-        result += user_repr[i] * item_repr[i]
-
-    return result
-
-
-cdef inline flt compute_ii_from_repr_nobias(flt *item_i_repr,
-                                       flt *item_j_repr,
-                                       int no_components) nogil:
-
-    cdef int i
-    cdef flt result
-
-    result = 0.0
-    # Latent factor dot product
-    for i in range(no_components):
-        result += item_i_repr[i] * item_j_repr[i]
-
-    return result
-
-
-cdef inline flt compute_ii_from_repr(flt *item_i_repr,
-                                       flt *item_j_repr,
-                                       int no_components) nogil:
-
-    cdef int i
-    cdef flt result
-
-    # Biases
-    result = item_i_repr[no_components] + item_j_repr[no_components]
-    # Latent factor dot product
-    for i in range(no_components):
-        result += item_i_repr[i] * item_j_repr[i]
+        result += repr_1[i] * repr_2[i]
 
     return result
 
@@ -817,9 +772,8 @@ def fit_warp(CSRMatrix item_features,
             user_id = user_ids[row]
             positive_item_id = item_ids[row]
 
-            # No longer needed
-            # if not Y[row] == 1:
-            #     continue
+            if not Y[row] > 0:
+                continue
 
             compute_representation(user_features,
                                    lightfm.user_features,
@@ -870,10 +824,6 @@ def fit_warp(CSRMatrix item_features,
 
                 if negative_prediction > positive_prediction - 1:
 
-                    # # Sample again if the sample negative is actually a positive
-                    # if in_positives(negative_item_id, user_id, interactions):
-                    #     continue
-
                     weight = log(floor((item_features.rows - 1) / sampled))
                     violation = 1 - positive_prediction + negative_prediction
                     loss = weight * violation
@@ -909,6 +859,8 @@ def fit_warp_kos(CSRMatrix item_features,
                  CSRMatrix user_features,
                  CSRMatrix data,
                  int[::1] user_ids,
+                 int[::1] item_ids,
+                 flt[::1] Y,
                  int[::1] shuffle_indices,
                  FastLightFM lightfm,
                  double learning_rate,
@@ -922,7 +874,7 @@ def fit_warp_kos(CSRMatrix item_features,
     """
 
     cdef int i, j, no_examples, user_id, positive_item_id, gamma, max_sampled
-    cdef int negative_item_id, sampled, row, sampled_positive_item_id
+    cdef int negative_item_id, sampled, row, sampled_positive_item_id, negative_item_index
     cdef int user_pids_start, user_pids_stop, no_positives, POS_SAMPLES
     cdef double positive_prediction, negative_prediction, violation, weight
     cdef double loss, MAX_LOSS, sampled_positive_prediction
@@ -1015,6 +967,13 @@ def fit_warp_kos(CSRMatrix item_features,
                 negative_item_id = (rand_r(&random_states[openmp.omp_get_thread_num()])
                                     % item_features.rows)
 
+                # Sample again if interaction counts for negative item are greater than or
+                # equal to positive item
+                negative_item_index = find_item_index(user_id, negative_item_id, data)
+                if negative_item_index != -1:
+                    if Y[negative_item_index] >= Y[row]:
+                        continue
+
                 compute_representation(item_features,
                                        lightfm.item_features,
                                        lightfm.item_biases,
@@ -1028,9 +987,6 @@ def fit_warp_kos(CSRMatrix item_features,
                                                                    lightfm.no_components)
 
                 if negative_prediction > positive_prediction - 1:
-
-                    if in_positives(negative_item_id, user_id, data):
-                        continue
 
                     weight = log(floor((item_features.rows - 1) / sampled))
                     violation = 1 - positive_prediction + negative_prediction
@@ -1081,7 +1037,7 @@ def fit_bpr(CSRMatrix item_features,
     """
 
     cdef int i, no_examples, user_id, positive_item_id
-    cdef int negative_item_id, sampled, row
+    cdef int negative_item_id, sampled, row, negative_item_index
     cdef double positive_prediction, negative_prediction
     cdef unsigned int[::1] random_states
     cdef flt *user_repr
@@ -1103,7 +1059,7 @@ def fit_bpr(CSRMatrix item_features,
         for i in prange(no_examples):
             row = shuffle_indices[i]
 
-            if not Y[row] == 1:
+            if not Y[row] > 0:
                 continue
 
             user_id = user_ids[row]
@@ -1112,8 +1068,12 @@ def fit_bpr(CSRMatrix item_features,
             while True:
                 negative_item_id = (rand_r(&random_states[openmp.omp_get_thread_num()])
                                     % item_features.rows)
-                if not in_positives(negative_item_id, user_id, interactions):
+
+                negative_item_index = find_item_index(user_id, negative_item_id, interactions)
+                if negative_item_index == -1 or Y[negative_item_index] < Y[row]:
+                    # Negative item is truly negative compared to positive item.
                     break
+
 
             compute_representation(user_features,
                                    lightfm.user_features,
@@ -1254,16 +1214,81 @@ def item_to_item_lightfm(CSRMatrix item_features,
                                    it_j_repr)
 
             if bias == 1:
-                predictions[i, j] = compute_ii_from_repr(it_i_repr,
-                                                         it_j_repr,
-                                                         lightfm.no_components)
+                predictions[i, j] = compute_prediction_from_repr(it_i_repr,
+                                                                 it_j_repr,
+                                                                 lightfm.no_components)
             else:
-                predictions[i, j] = compute_ii_from_repr_nobias(it_i_repr,
-                                                                it_j_repr,
+                predictions[i, j] = compute_prediction_from_repr_nobias(it_i_repr,
+                                                                        it_j_repr,
+                                                                        lightfm.no_components)
+
+
+def user_norms_lightfm(CSRMatrix user_features,
+                         int[::1] user_ids,
+                         double[::1] user_norms,
+                         FastLightFM lightfm,
+                         int num_threads):
+    """
+    Generate full user and item vectors
+    """
+
+    cdef int i, no_examples
+    cdef flt *user_repr
+    cdef flt *it_repr
+
+    no_users = user_norms.shape[0]
+
+    with nogil, parallel(num_threads=num_threads):
+
+        user_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
+
+        for i in prange(no_users):
+            compute_representation(user_features,
+                                   lightfm.user_features,
+                                   lightfm.user_biases,
+                                   lightfm,
+                                   user_ids[i],
+                                   lightfm.user_scale,
+                                   user_repr)
+
+            user_norms[i] = compute_prediction_from_repr_nobias(user_repr,
+                                                                user_repr,
                                                                 lightfm.no_components)
 
 
-def test_find_func(CSRMatrix item_features,
+def item_norms_lightfm(CSRMatrix item_features,
+                         int[::1] item_ids,
+                         double[::1] item_norms,
+                         FastLightFM lightfm,
+                         int num_threads):
+    """
+    Generate norms of item vectors
+    """
+
+    cdef int i, no_items
+    cdef flt *it_repr
+
+    no_items = item_norms.shape[0]
+
+    with nogil, parallel(num_threads=num_threads):
+
+        it_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
+
+        for i in prange(no_items):
+            compute_representation(item_features,
+                                   lightfm.item_features,
+                                   lightfm.item_biases,
+                                   lightfm,
+                                   item_ids[i],
+                                   lightfm.item_scale,
+                                   it_repr)
+
+            item_norms[i] = compute_prediction_from_repr_nobias(it_repr,
+                                                                it_repr,
+                                                                lightfm.no_components)
+
+
+def __test_find_func(CSRMatrix item_features,
                  CSRMatrix user_features,
                  CSRMatrix interactions,
                  int[::1] user_ids,
