@@ -3,7 +3,8 @@ import numpy as np
 import scipy.sparse as sp
 from .lightfm_fast import (CSRMatrix, FastLightFM,
                            fit_logistic, predict_lightfm,
-                           fit_warp, fit_bpr, fit_warp_kos,
+                           fit_warp,
+                           # fit_bpr, fit_warp_kos,
                            item_to_item_lightfm,
                            user_norms_lightfm, item_norms_lightfm,
                            __test_find_func)
