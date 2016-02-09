@@ -283,7 +283,8 @@ class LightFM(object):
         """
         Run an individual epoch.
         """
-        user_group_ids = np.arange(n_users, user_features.shape[1], dtype=np.int32)
+        user_group_id_start = n_users
+        user_group_id_end = user_features.shape[1]
 
         # Create shuffle indexes.
         shuffle_indices = np.arange(len(interactions.data), dtype=np.int32)
@@ -315,7 +316,8 @@ class LightFM(object):
                      interactions.row,
                      interactions.col,
                      interactions.data,
-                     user_group_ids,
+                     user_group_id_start,
+                     user_group_id_end,
                      shuffle_indices,
                      lightfm_data,
                      self.learning_rate,
