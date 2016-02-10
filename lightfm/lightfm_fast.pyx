@@ -372,6 +372,8 @@ cdef double update_biases(CSRMatrix feature_indices,
     return sum_learning_rate
 
 cdef double update_dense_biases(CSRMatrix feature_indices,
+                          int start_index,
+                          int stop_index,
                           int group_id_start,
                           int group_id_end,
                           flt[::1] biases,
@@ -391,6 +393,7 @@ cdef double update_dense_biases(CSRMatrix feature_indices,
     cdef double feature_weight, local_learning_rate, sum_learning_rate, update
 
     sum_learning_rate = 0.0
+    feature = feature_indices.indices[start_index]
 
     # if adadelta:
     #     # Ignore for now because I don't know how this works.
@@ -412,13 +415,23 @@ cdef double update_dense_biases(CSRMatrix feature_indices,
     #         sum_learning_rate += local_learning_rate
     # else:
     for i in range(group_id_start, group_id_end):
+        if start_index == stop_index:
+            # Reached the end
+            local_learning_rate = learning_rate / sqrt(gradients[i])
+            biases[i] -= local_learning_rate * (2 * alpha * biases[i])
+        else:
+            feature = feature_indices.indices[start_index]
+            if feature == i:
+                # feature = feature_indices.indices[i]
+                feature_weight = feature_indices.data[start_index]
+                local_learning_rate = learning_rate / sqrt(gradients[i])
+                biases[i] -= local_learning_rate * (gradient + 2 * alpha * biases[i])
+                gradients[i] += gradient ** 2
+                start_index += 1
+            else:
+                local_learning_rate = learning_rate / sqrt(gradients[i])
+                biases[i] -= local_learning_rate * (2 * alpha * biases[i])
 
-        feature = feature_indices.indices[i]
-        feature_weight = feature_indices.data[i]
-
-        local_learning_rate = learning_rate / sqrt(gradients[feature])
-        biases[feature] -= local_learning_rate * (gradient + 2 * alpha * feature_weight)
-        gradients[feature] += gradient ** 2
 
 
 cdef inline double update_features(CSRMatrix feature_indices,
@@ -486,6 +499,8 @@ cdef inline double update_dense_features(CSRMatrix feature_indices,
                                    flt[:, ::1] gradients,
                                    flt[:, ::1] momentum,
                                    int component,
+                                   int start_index,
+                                   int stop_index,
                                    int group_id_start,
                                    int group_id_end,
                                    double gradient,
@@ -525,12 +540,22 @@ cdef inline double update_dense_features(CSRMatrix feature_indices,
     # else:
     for i in range(group_id_start, group_id_end):
 
-        feature = feature_indices.indices[i]
-        feature_weight = feature_indices.data[i]
-
-        local_learning_rate = learning_rate / sqrt(gradients[feature, component])
-        features[feature, component] -= local_learning_rate * (gradient + 2 * alpha * feature_weight)
-        gradients[feature, component] += gradient ** 2
+        if start_index == stop_index:
+            # Reached the end
+            local_learning_rate = learning_rate / sqrt(gradients[i, component])
+            features[i, component] -= local_learning_rate * (2 * alpha * features[i, component])
+        else:
+            feature = feature_indices.indices[start_index]
+            if feature == i:
+                # feature = feature_indices.indices[i]
+                feature_weight = feature_indices.data[start_index]
+                local_learning_rate = learning_rate / sqrt(gradients[i, component])
+                features[i, component] -= local_learning_rate * (gradient + 2 * alpha * features[i, component])
+                gradients[i, component] += gradient ** 2
+                start_index += 1
+            else:
+                local_learning_rate = learning_rate / sqrt(gradients[i, component])
+                features[i, component] -= local_learning_rate * (2 * alpha * features[i, component])
 
 
 cdef inline void update(double loss,
@@ -693,7 +718,8 @@ cdef void warp_update(double loss,
                                        lightfm.eps)
 
     # Next, we do slow updates on the dense features.
-    update_dense_biases(user_features, user_group_id_start, user_group_id_end,
+    update_dense_biases(user_features, user_start_index + 1, user_stop_index,
+                        user_group_id_start, user_group_id_end,
                                        lightfm.user_biases, lightfm.user_bias_gradients,
                                        lightfm.user_bias_momentum,
                                        loss,
@@ -747,7 +773,8 @@ cdef void warp_update(double loss,
         update_dense_features(user_features, lightfm.user_features,
                                              lightfm.user_feature_gradients,
                                              lightfm.user_feature_momentum,
-                                             i, user_group_id_start, user_group_id_end,
+                                             i, user_start_index + 1, user_stop_index,
+                                             user_group_id_start, user_group_id_end,
                                              loss * (negative_item_component -
                                                      positive_item_component),
                                              lightfm.adadelta,
