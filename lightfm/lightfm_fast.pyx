@@ -733,6 +733,7 @@ def fit_warp(CSRMatrix item_features,
              flt[::1] Y,
              int[::1] shuffle_indices,
              FastLightFM lightfm,
+             flt[::1] precomputed_item_bias,
              double learning_rate,
              double item_alpha,
              double user_alpha,
@@ -826,7 +827,7 @@ def fit_warp(CSRMatrix item_features,
 
                     weight = log(floor((item_features.rows - 1) / sampled))
                     violation = 1 - positive_prediction + negative_prediction
-                    loss = weight * violation
+                    loss = weight * violation * precomputed_item_bias[negative_item_id] # HERE
 
                     # Clip gradients for numerical stability.
                     if loss > MAX_LOSS:
@@ -863,6 +864,7 @@ def fit_warp_kos(CSRMatrix item_features,
                  flt[::1] Y,
                  int[::1] shuffle_indices,
                  FastLightFM lightfm,
+                 flt[::1] precomputed_item_bias,
                  double learning_rate,
                  double item_alpha,
                  double user_alpha,
@@ -990,7 +992,7 @@ def fit_warp_kos(CSRMatrix item_features,
 
                     weight = log(floor((item_features.rows - 1) / sampled))
                     violation = 1 - positive_prediction + negative_prediction
-                    loss = weight * violation
+                    loss = weight * violation # MULTIPLY THE LOSS BY THE NEGATIVE ITEM POPULARITY? see http://www0.cs.ucl.ac.uk/staff/Weinan.Zhang/papers/seren-wi.pdf
 
                     # Clip gradients for numerical stability.
                     if loss > MAX_LOSS:

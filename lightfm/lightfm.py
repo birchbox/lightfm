@@ -18,7 +18,7 @@ class LightFM(object):
                  learning_schedule='adagrad',
                  loss='logistic',
                  learning_rate=0.05, rho=0.95, epsilon=1e-6,
-                 item_alpha=0.0, user_alpha=0.0):
+                 item_alpha=0.0, user_alpha=0., sdpty_alpha=0):
         """
         Initialise the model.
 
@@ -93,6 +93,8 @@ class LightFM(object):
 
         self.item_alpha = item_alpha
         self.user_alpha = user_alpha
+
+        self.sdpty_alpha = sdpty_alpha
 
         self._reset_state()
 
@@ -248,6 +250,10 @@ class LightFM(object):
         user_features = self._to_cython_dtype(user_features)
         item_features = self._to_cython_dtype(item_features)
 
+        precomputed_item_bias = np.empty(n_items, dtype=np.float32)
+        for i in xrange(n_items):
+            precomputed_item_bias[i] = np.float(interactions.getrow(i).nnz) ** self.sdpty_alpha
+
         if self.item_embeddings is None:
             # Initialise latent factors only if this is the first call
             # to fit_partial.
@@ -271,13 +277,14 @@ class LightFM(object):
             self._run_epoch(item_features,
                             user_features,
                             interactions,
+                            precomputed_item_bias,
                             num_threads,
                             self.loss)
 
         return self
 
 
-    def _run_epoch(self, item_features, user_features, interactions, num_threads, loss):
+    def _run_epoch(self, item_features, user_features, interactions, precomputed_item_bias, num_threads, loss):
         """
         Run an individual epoch.
         """
@@ -314,6 +321,7 @@ class LightFM(object):
                      interactions.data,
                      shuffle_indices,
                      lightfm_data,
+                     precomputed_item_bias,
                      self.learning_rate,
                      self.item_alpha,
                      self.user_alpha,
