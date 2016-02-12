@@ -251,10 +251,10 @@ class LightFM(object):
         item_features = self._to_cython_dtype(item_features)
 
         precomputed_item_bias = np.empty(n_items, dtype=np.float32)
-        interactions = interactions.tocsr()
+        interactions = interactions.T.tocsr()
         for i in xrange(n_items):
             precomputed_item_bias[i] = np.float(interactions.getrow(i).nnz) ** self.sdpty_alpha
-        interactions = interactions.tocoo()
+        interactions = interactions.tocoo().T
 
 
         if self.item_embeddings is None:
