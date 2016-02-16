@@ -767,7 +767,7 @@ def fit_warp(CSRMatrix item_features,
         pos_it_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
         neg_it_repr = <flt *>malloc(sizeof(flt) * (lightfm.no_components + 1))
 
-        for i in prange(no_examples):
+        for i in prange(no_examples, schedule='dynamic'):
             row = shuffle_indices[i]
 
             user_id = user_ids[row]
