@@ -358,6 +358,38 @@ cdef double update_biases(CSRMatrix feature_indices,
     return sum_learning_rate
 
 
+cdef double update_biases_simplereg(CSRMatrix feature_indices,
+                          int start,
+                          int stop,
+                          flt[::1] biases,
+                          flt[::1] gradients,
+                          double loss,
+                          double learning_rate,
+                          double alpha) nogil:
+    """
+    Perform a SGD update of the bias terms.
+    """
+
+    cdef int i, feature
+    cdef double feature_weight, local_learning_rate, sum_learning_rate, gradient
+
+    sum_learning_rate = 0.0
+
+    for i in range(start, stop):
+
+        feature = feature_indices.indices[i]
+        feature_weight = feature_indices.data[i]
+
+        local_learning_rate = learning_rate / sqrt(gradients[feature])
+        gradient = loss - feature_weight * alpha
+        biases[feature] -= local_learning_rate * gradient
+        gradients[feature] += gradient ** 2
+
+        sum_learning_rate += local_learning_rate
+
+    return sum_learning_rate
+
+
 cdef inline double update_features(CSRMatrix feature_indices,
                                    flt[:, ::1] features,
                                    flt[:, ::1] gradients,
@@ -409,14 +441,93 @@ cdef inline double update_features(CSRMatrix feature_indices,
             features[feature, component] -= local_learning_rate * feature_weight * gradient
             gradients[feature, component] += gradient ** 2
 
-            # Lazy regularization: scale up by the regularization
-            # parameter.
-            features[feature, component] *= (1.0 + alpha * local_learning_rate)
-
             sum_learning_rate += local_learning_rate
 
     return sum_learning_rate
 
+
+cdef inline double update_item_features(CSRMatrix feature_indices,
+                                   flt[:, ::1] features,
+                                   flt[:, ::1] gradients,
+                                   int no_components,
+                                   int start,
+                                   int stop,
+                                   double loss,
+                                   flt* user_repr,
+                                   double learning_rate,
+                                   double alpha) nogil:
+    """
+    Update item feature vectors with max norm constraint.
+    """
+
+    cdef int i, j, feature
+    cdef double feature_weight, local_learning_rate, sum_learning_rate, norm
+
+    sum_learning_rate = 0.0
+
+
+    for i in range(start, stop):
+        feature = feature_indices.indices[i]
+        feature_weight = feature_indices.data[i]
+        norm = 0.0
+        for j in range(no_components):
+            local_learning_rate = learning_rate / sqrt(gradients[feature, j])
+            gradient = loss * user_repr[j]
+            # I think we ignore feature_weight here. Should already be included in gradient?
+            # features[feature, j] -= local_learning_rate * feature_weight * gradient
+            features[feature, j] -= local_learning_rate * gradient
+            gradients[feature, j] += gradient ** 2
+            norm += features[feature, j]**2
+            sum_learning_rate += local_learning_rate
+        if norm > alpha:
+            # If norm lies outside L2 ball of radius alpha,
+            # project feature back onto shell of the ball.
+            for j in range(no_components):
+                features[feature, j] = features[feature, j] * alpha / norm
+
+
+    return sum_learning_rate
+
+cdef inline double update_user_features(CSRMatrix feature_indices,
+                                   flt[:, ::1] features,
+                                   flt[:, ::1] gradients,
+                                   int no_components,
+                                   int start,
+                                   int stop,
+                                   double loss,
+                                   flt* pos_it_repr,
+                                   flt* neg_it_repr,
+                                   double learning_rate,
+                                   double alpha) nogil:
+    """
+    Update user feature vectors with max norm constraint.
+    """
+
+    cdef int i, j, feature
+    cdef double feature_weight, local_learning_rate, sum_learning_rate, norm
+
+    sum_learning_rate = 0.0
+
+
+    for i in range(start, stop):
+        feature = feature_indices.indices[i]
+        feature_weight = feature_indices.data[i]
+        norm = 0.0
+        for j in range(no_components):
+            local_learning_rate = learning_rate / sqrt(gradients[feature, j])
+            gradient = loss * (neg_it_repr[j] - pos_it_repr[j])
+            features[feature, j] -= local_learning_rate * feature_weight * gradient
+            gradients[feature, j] += gradient ** 2
+            norm += features[feature, j]**2
+            sum_learning_rate += local_learning_rate
+        if norm > alpha:
+            # If norm lies outside L2 ball of radius alpha,
+            # project feature back onto shell of the ball.
+            for j in range(no_components):
+                features[feature, j] = features[feature, j] * alpha / norm
+
+
+    return sum_learning_rate
 
 cdef inline void update(double loss,
                         CSRMatrix item_features,
@@ -535,6 +646,96 @@ cdef void warp_update(double loss,
     user_start_index = user_features.get_row_start(user_id)
     user_stop_index = user_features.get_row_end(user_id)
 
+
+    avg_learning_rate += update_biases_simplereg(item_features,
+                                       positive_item_start_index,
+                                       positive_item_stop_index,
+                                       lightfm.item_biases, lightfm.item_bias_gradients,
+                                       -loss,
+                                       lightfm.learning_rate,
+                                       item_alpha)
+
+    avg_learning_rate += update_biases_simplereg(item_features, negative_item_start_index,
+                                       negative_item_stop_index,
+                                       lightfm.item_biases, lightfm.item_bias_gradients,
+                                       loss,
+                                       lightfm.learning_rate,
+                                       item_alpha)
+    avg_learning_rate += update_biases_simplereg(user_features, user_start_index, user_stop_index,
+                                       lightfm.user_biases, lightfm.user_bias_gradients,
+                                       loss,
+                                       lightfm.learning_rate,
+                                       user_alpha)
+
+    # Update latent representations.
+
+    avg_learning_rate += update_item_features(item_features, lightfm.item_features,
+                                         lightfm.item_feature_gradients,
+                                         lightfm.no_components,
+                                         positive_item_start_index, positive_item_stop_index,
+                                         -loss,
+                                         user_repr,
+                                         lightfm.learning_rate,
+                                         item_alpha)
+    avg_learning_rate += update_item_features(item_features, lightfm.item_features,
+                                         lightfm.item_feature_gradients,
+                                         lightfm.no_components,
+                                         negative_item_start_index, negative_item_stop_index,
+                                         loss,
+                                         user_repr,
+                                         lightfm.learning_rate,
+                                         item_alpha)
+    avg_learning_rate += update_user_features(user_features, lightfm.user_features,
+                                         lightfm.user_feature_gradients,
+                                         lightfm.no_components,
+                                         user_start_index, user_stop_index,
+                                         loss,
+                                         pos_it_repr,
+                                         neg_it_repr,
+                                         lightfm.learning_rate,
+                                         user_alpha)
+
+
+    avg_learning_rate /= ((lightfm.no_components + 1) * (user_stop_index - user_start_index)
+                          + (lightfm.no_components + 1) *
+                          (positive_item_stop_index - positive_item_start_index)
+                          + (lightfm.no_components + 1)
+                          * (negative_item_stop_index - negative_item_start_index))
+
+cdef void warp_kos_update(double loss,
+                      CSRMatrix item_features,
+                      CSRMatrix user_features,
+                      int user_id,
+                      int positive_item_id,
+                      int negative_item_id,
+                      flt *user_repr,
+                      flt *pos_it_repr,
+                      flt *neg_it_repr,
+                      FastLightFM lightfm,
+                      double item_alpha,
+                      double user_alpha) nogil:
+    """
+    Apply the gradient step.
+    """
+
+    cdef int i, j, positive_item_start_index, positive_item_stop_index
+    cdef int  user_start_index, user_stop_index, negative_item_start_index, negative_item_stop_index
+    cdef double avg_learning_rate
+    cdef flt positive_item_component, negative_item_component, user_component
+
+    avg_learning_rate = 0.0
+
+    # Get the iteration ranges for features
+    # for this training example.
+    positive_item_start_index = item_features.get_row_start(positive_item_id)
+    positive_item_stop_index = item_features.get_row_end(positive_item_id)
+
+    negative_item_start_index = item_features.get_row_start(negative_item_id)
+    negative_item_stop_index = item_features.get_row_end(negative_item_id)
+
+    user_start_index = user_features.get_row_start(user_id)
+    user_stop_index = user_features.get_row_end(user_id)
+
     avg_learning_rate += update_biases(item_features, positive_item_start_index,
                                        positive_item_stop_index,
                                        lightfm.item_biases, lightfm.item_bias_gradients,
@@ -566,6 +767,7 @@ cdef void warp_update(double loss,
                                        lightfm.eps)
 
     # Update latent representations.
+
     for i in range(lightfm.no_components):
 
         user_component = user_repr[i]
@@ -603,6 +805,7 @@ cdef void warp_update(double loss,
                                              user_alpha,
                                              lightfm.rho,
                                              lightfm.eps)
+
 
     avg_learning_rate /= ((lightfm.no_components + 1) * (user_stop_index - user_start_index)
                           + (lightfm.no_components + 1) *
@@ -847,9 +1050,6 @@ def fit_warp(CSRMatrix item_features,
         free(pos_it_repr)
         free(neg_it_repr)
 
-    regularize(lightfm,
-               item_alpha,
-               user_alpha)
 
 
 def fit_warp_kos(CSRMatrix item_features,
@@ -990,7 +1190,7 @@ def fit_warp_kos(CSRMatrix item_features,
                     if loss > MAX_LOSS:
                         loss = MAX_LOSS
 
-                    warp_update(loss,
+                    warp_kos_update(loss,
                                 item_features,
                                 user_features,
                                 user_id,
@@ -1098,7 +1298,7 @@ def fit_bpr(CSRMatrix item_features,
                                                                neg_it_repr,
                                                                lightfm.no_components)
 
-            warp_update(sigmoid(positive_prediction - negative_prediction),
+            warp_kos_update(sigmoid(positive_prediction - negative_prediction),
                         item_features,
                         user_features,
                         user_id,
