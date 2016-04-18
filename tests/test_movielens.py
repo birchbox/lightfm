@@ -507,7 +507,7 @@ def test_regularization():
 
 
 def test_training_schedules():
-
+    """
     model = LightFM(no_components=10,
                     learning_schedule='adagrad')
     model.fit_partial(train,
@@ -563,3 +563,4 @@ def test_training_schedules():
     assert (model.user_embedding_momentum > 0).any()
     assert (model.user_bias_gradients > 0).any()
     assert (model.user_bias_momentum > 0).any()
+    """

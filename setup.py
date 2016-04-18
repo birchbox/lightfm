@@ -18,7 +18,7 @@ def define_extensions(file_ext):
     # This could be because Anaconda uses its own assembler?
     # To work around this we do not add -march=native if we
     # know we're dealing with Anaconda
-    if 'anaconda' not in sys.version.lower():
+    if 'anaconda' not in sys.version.lower() and 'continuum analytics' not in sys.version.lower():
         compile_args.append('-march=native')
 
     return [Extension("lightfm.lightfm_fast",
